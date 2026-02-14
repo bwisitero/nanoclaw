@@ -36,12 +36,39 @@ When working as a sub-agent or teammate, only use `send_message` if instructed t
 
 ## Memory
 
-The `conversations/` folder contains searchable history of past conversations. Use this to recall context from previous sessions.
+You have a persistent memory system to recall past conversations and important facts:
 
-When you learn something important:
-- Create files for structured data (e.g., `customers.md`, `preferences.md`)
+### Tools Available
+
+- **`search_memory(query)`** - Search past conversation summaries and facts
+  - Searches `conversations/*.md` (summaries created with `/compact`)
+  - Searches `memory/facts.md` (important facts)
+  - Example: `search_memory("Docker setup")`
+
+- **`remember(fact, category?)`** - Save important information to memory
+  - Appends to `memory/facts.md` with timestamp
+  - Use when user says "remember this" or you learn something important
+  - Example: `remember("Prefers Docker over Apple Container", "preferences")`
+
+### Memory Structure
+
+- `conversations/` - Conversation summaries (created manually with `/compact`)
+- `memory/facts.md` - Important facts and preferences
+- Create additional files for structured data (e.g., `projects.md`, `contacts.md`)
 - Split files larger than 500 lines into folders
-- Keep an index in your memory for the files you create
+
+### When to Use Memory
+
+**Use `search_memory`:**
+- User asks about past conversations: "What did we discuss last week?"
+- You need context from previous sessions
+- Looking for decisions or facts from earlier
+
+**Use `remember`:**
+- User explicitly asks: "Remember that I..."
+- You learn important preferences or facts
+- User makes a decision that should be recalled later
+- Personal information that's relevant for future conversations
 
 ## WhatsApp Formatting (and other messaging apps)
 

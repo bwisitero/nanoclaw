@@ -52,7 +52,7 @@ beforeEach(() => {
 
   deps = {
     sendMessage: async () => {},
-    sendFile: async () => {},
+    sendFile: async (_jid: string, _filePath: string, _groupFolder: string, _caption?: string) => {},
     registeredGroups: () => groups,
     registerGroup: (jid, group) => {
       groups[jid] = group;

@@ -5,6 +5,7 @@ import path from 'path';
 import {
   ASSISTANT_NAME,
   DATA_DIR,
+  GROUPS_DIR,
   IDLE_TIMEOUT,
   MAIN_GROUP_FOLDER,
   POLL_INTERVAL,
@@ -596,11 +597,13 @@ async function main(): Promise<void> {
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
       return channel.sendMessage(jid, text);
     },
-    sendFile: async (jid, filePath, caption) => {
+    sendFile: async (jid, filePath, groupFolder, caption) => {
       const channel = findChannel(channels, jid);
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
       if (!channel.sendFile) throw new Error(`Channel ${channel.name} does not support file sending`);
-      return channel.sendFile(jid, filePath, caption);
+      // Resolve group-relative path to absolute path
+      const absolutePath = path.join(GROUPS_DIR, groupFolder, filePath);
+      return channel.sendFile(jid, absolutePath, caption);
     },
     registeredGroups: () => registeredGroups,
     registerGroup,

@@ -312,6 +312,111 @@ Use available_groups.json to find the JID for a group. The folder name should be
   },
 );
 
+server.tool(
+  'search_memory',
+  'Search past conversation summaries and memory files for relevant information. Useful for recalling past discussions, decisions, or facts.',
+  {
+    query: z.string().describe('Search query or keywords to find in past conversations'),
+    limit: z.number().default(10).describe('Maximum number of results to return'),
+  },
+  async (args) => {
+    const conversationsDir = path.join('/workspace/group', 'conversations');
+    const memoryDir = path.join('/workspace/group', 'memory');
+
+    const results: string[] = [];
+
+    // Search conversations/*.md files
+    if (fs.existsSync(conversationsDir)) {
+      const files = fs.readdirSync(conversationsDir)
+        .filter(f => f.endsWith('.md'))
+        .sort()
+        .reverse(); // Most recent first
+
+      for (const file of files) {
+        if (results.length >= args.limit) break;
+
+        const filePath = path.join(conversationsDir, file);
+        const content = fs.readFileSync(filePath, 'utf-8');
+
+        // Simple grep for query
+        const lines = content.split('\n');
+        const matches = lines.filter(line =>
+          line.toLowerCase().includes(args.query.toLowerCase())
+        );
+
+        if (matches.length > 0) {
+          results.push(`**${file}**:\n${matches.slice(0, 3).join('\n')}\n`);
+        }
+      }
+    }
+
+    // Search memory/facts.md
+    const factsFile = path.join(memoryDir, 'facts.md');
+    if (fs.existsSync(factsFile) && results.length < args.limit) {
+      const content = fs.readFileSync(factsFile, 'utf-8');
+      const lines = content.split('\n');
+      const matches = lines.filter(line =>
+        line.toLowerCase().includes(args.query.toLowerCase())
+      );
+
+      if (matches.length > 0) {
+        results.push(`**memory/facts.md**:\n${matches.join('\n')}\n`);
+      }
+    }
+
+    if (results.length === 0) {
+      return {
+        content: [{
+          type: 'text' as const,
+          text: `No results found for "${args.query}". Try broader search terms or check if conversations have been summarized with /compact.`
+        }]
+      };
+    }
+
+    return {
+      content: [{
+        type: 'text' as const,
+        text: `Found ${results.length} result(s):\n\n${results.join('\n---\n\n')}`
+      }]
+    };
+  },
+);
+
+server.tool(
+  'remember',
+  'Save an important fact or piece of information to persistent memory. Use this when the user asks you to remember something, or when you learn something important that should be recalled in future conversations.',
+  {
+    fact: z.string().describe('The fact or information to remember'),
+    category: z.string().optional().describe('Optional category (e.g., "preferences", "work", "family")'),
+  },
+  async (args) => {
+    const memoryDir = path.join('/workspace/group', 'memory');
+    const factsFile = path.join(memoryDir, 'facts.md');
+
+    // Create memory directory if it doesn't exist
+    fs.mkdirSync(memoryDir, { recursive: true });
+
+    // Create facts file if it doesn't exist
+    if (!fs.existsSync(factsFile)) {
+      fs.writeFileSync(factsFile, '# Memory\n\nImportant facts and information:\n\n');
+    }
+
+    // Append fact with timestamp
+    const timestamp = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+    const category = args.category ? ` [${args.category}]` : '';
+    const entry = `- **[${timestamp}]**${category} ${args.fact}\n`;
+
+    fs.appendFileSync(factsFile, entry);
+
+    return {
+      content: [{
+        type: 'text' as const,
+        text: `Remembered: ${args.fact}`
+      }]
+    };
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);

@@ -489,9 +489,9 @@ function ensureContainerSystemRunning(): void {
     let orphans: string[] = [];
 
     if (runtime === 'docker') {
-      // Docker: list containers with name filter
+      // Docker: list ALL containers using our image (catches random-named containers too)
       const output = execSync(
-        'docker ps -a --filter "name=nanoclaw-" --format "{{.Names}}"',
+        'docker ps -a --filter "ancestor=nanoclaw-agent:latest" --format "{{.Names}}"',
         {
           stdio: ['pipe', 'pipe', 'pipe'],
           encoding: 'utf-8',
@@ -500,7 +500,7 @@ function ensureContainerSystemRunning(): void {
       orphans = output
         .trim()
         .split('\n')
-        .filter((name) => name && name.startsWith('nanoclaw-'));
+        .filter((name) => name && name.length > 0);
     } else {
       // Apple Container: use ls --format json
       const output = execSync('container ls --format json', {

@@ -63,6 +63,44 @@ server.tool(
 );
 
 server.tool(
+  'send_file',
+  'Send a file attachment (photo, video, document, audio) to the user or group. Files in /workspace/group/uploads/ are automatically accessible.',
+  {
+    file_path: z.string().describe('Path to file relative to /workspace/group/ (e.g., "uploads/edited_image.jpg") or absolute path'),
+    caption: z.string().optional().describe('Optional caption/message to include with the file'),
+  },
+  async (args) => {
+    // Validate file exists
+    const absolutePath = args.file_path.startsWith('/')
+      ? args.file_path
+      : path.join('/workspace/group', args.file_path);
+
+    if (!fs.existsSync(absolutePath)) {
+      return {
+        content: [{ type: 'text' as const, text: `File not found: ${args.file_path}` }],
+        isError: true,
+      };
+    }
+
+    // Convert absolute path back to group-relative path for host
+    const groupRelativePath = absolutePath.replace('/workspace/group/', '');
+
+    const data = {
+      type: 'send_file',
+      chatJid,
+      filePath: groupRelativePath,
+      caption: args.caption || undefined,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(MESSAGES_DIR, data);
+
+    return { content: [{ type: 'text' as const, text: `File sent: ${path.basename(args.file_path)}` }] };
+  },
+);
+
+server.tool(
   'schedule_task',
   `Schedule a recurring or one-time task. The task will run as a full agent with access to all tools.
 

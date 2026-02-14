@@ -1,4 +1,4 @@
-import { Bot } from 'grammy';
+import { Bot, InputFile } from 'grammy';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -506,6 +506,69 @@ export class TelegramChannel implements Channel {
       logger.info({ jid, length: text.length }, 'Telegram message sent');
     } catch (err) {
       logger.error({ jid, err }, 'Failed to send Telegram message');
+    }
+  }
+
+  /**
+   * Send a file attachment to a Telegram chat
+   * @param jid Chat JID (e.g., tg:123456789)
+   * @param filePath Absolute path to file on host (will be resolved relative to GROUPS_DIR if needed)
+   * @param caption Optional caption for the file
+   */
+  async sendFile(jid: string, filePath: string, caption?: string): Promise<void> {
+    if (!this.bot) {
+      logger.warn('Telegram bot not initialized');
+      return;
+    }
+
+    try {
+      const numericId = jid.replace(/^tg:/, '');
+
+      // Resolve file path if it's relative to groups directory
+      let absolutePath = filePath;
+      if (!path.isAbsolute(filePath)) {
+        absolutePath = path.join(GROUPS_DIR, filePath);
+      }
+
+      // Check if file exists
+      if (!fs.existsSync(absolutePath)) {
+        logger.error({ filePath: absolutePath }, 'File not found for sending');
+        throw new Error(`File not found: ${absolutePath}`);
+      }
+
+      // Determine file type by extension
+      const ext = path.extname(absolutePath).toLowerCase();
+      const fileName = path.basename(absolutePath);
+
+      // Send based on file type
+      if (['.jpg', '.jpeg', '.png', '.gif', '.webp'].includes(ext)) {
+        // Send as photo
+        await this.bot.api.sendPhoto(numericId, new InputFile(absolutePath), {
+          caption: caption || undefined,
+        });
+        logger.info({ jid, fileName, type: 'photo' }, 'Telegram photo sent');
+      } else if (['.mp4', '.mov', '.avi', '.mkv'].includes(ext)) {
+        // Send as video
+        await this.bot.api.sendVideo(numericId, new InputFile(absolutePath), {
+          caption: caption || undefined,
+        });
+        logger.info({ jid, fileName, type: 'video' }, 'Telegram video sent');
+      } else if (['.mp3', '.wav', '.ogg', '.m4a'].includes(ext)) {
+        // Send as audio
+        await this.bot.api.sendAudio(numericId, new InputFile(absolutePath), {
+          caption: caption || undefined,
+        });
+        logger.info({ jid, fileName, type: 'audio' }, 'Telegram audio sent');
+      } else {
+        // Send as document (generic file)
+        await this.bot.api.sendDocument(numericId, new InputFile(absolutePath), {
+          caption: caption || undefined,
+        });
+        logger.info({ jid, fileName, type: 'document' }, 'Telegram document sent');
+      }
+    } catch (err) {
+      logger.error({ jid, filePath, err }, 'Failed to send Telegram file');
+      throw err;
     }
   }
 

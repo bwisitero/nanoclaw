@@ -69,7 +69,7 @@ function createFakeSocket() {
 let fakeSocket: ReturnType<typeof createFakeSocket>;
 
 // Mock Baileys
-vi.mock('@whiskeysockets/baileys', () => {
+vi.mock('baileys', () => {
   return {
     default: vi.fn(() => fakeSocket),
     Browsers: { macOS: vi.fn(() => ['macOS', 'Chrome', '']) },

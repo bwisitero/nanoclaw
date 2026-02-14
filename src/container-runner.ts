@@ -1,8 +1,8 @@
 /**
  * Container Runner for NanoClaw
- * Spawns agent execution in Apple Container and handles IPC
+ * Spawns agent execution in Apple Container or Docker and handles IPC
  */
-import { ChildProcess, exec, spawn } from 'child_process';
+import { ChildProcess, exec, execSync, spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -18,6 +18,35 @@ import {
 import { logger } from './logger.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
+
+// Detect which container runtime is available
+let detectedRuntime: 'docker' | 'container' | null = null;
+
+function getContainerRuntime(): 'docker' | 'container' {
+  if (detectedRuntime) return detectedRuntime;
+
+  // Try Docker first (more common and cross-platform)
+  try {
+    execSync('docker info', { stdio: 'ignore' });
+    detectedRuntime = 'docker';
+    logger.info('Detected container runtime: Docker');
+    return 'docker';
+  } catch (err) {
+    // Docker not available, try Apple Container
+  }
+
+  // Try Apple Container
+  try {
+    execSync('container --version', { stdio: 'ignore' });
+    detectedRuntime = 'container';
+    logger.info('Detected container runtime: Apple Container');
+    return 'container';
+  } catch (err) {
+    // Neither available
+  }
+
+  throw new Error('No container runtime found. Please install Docker or Apple Container.');
+}
 
 // Sentinel markers for robust output parsing (must match agent-runner)
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
@@ -124,6 +153,16 @@ function buildVolumeMounts(
     }, null, 2) + '\n');
   }
 
+  // Mount AWS credentials directory (if it exists) for Bedrock authentication
+  const awsDir = path.join(homeDir, '.aws');
+  if (fs.existsSync(awsDir)) {
+    mounts.push({
+      hostPath: awsDir,
+      containerPath: '/home/node/.aws',
+      readonly: true,
+    });
+  }
+
   // Sync skills from container/skills/ into each group's .claude/skills/
   const skillsSrc = path.join(process.cwd(), 'container', 'skills');
   const skillsDst = path.join(groupSessionsDir, 'skills');
@@ -158,6 +197,15 @@ function buildVolumeMounts(
     readonly: false,
   });
 
+  // Uploads directory for files sent via Telegram/WhatsApp
+  const groupUploadsDir = path.join(GROUPS_DIR, group.folder, 'uploads');
+  fs.mkdirSync(groupUploadsDir, { recursive: true });
+  mounts.push({
+    hostPath: groupUploadsDir,
+    containerPath: '/workspace/group/uploads',
+    readonly: false,
+  });
+
   // Mount agent-runner source from host — recompiled on container startup.
   // Bypasses Apple Container's sticky build cache for code changes.
   const agentRunnerSrc = path.join(projectRoot, 'container', 'agent-runner', 'src');
@@ -183,30 +231,71 @@ function buildVolumeMounts(
 /**
  * Read allowed secrets from .env for passing to the container via stdin.
  * Secrets are never written to disk or mounted as files.
+ *
+ * Also includes AWS credentials from the environment (for Bedrock support).
  */
 function readSecrets(): Record<string, string> {
-  const envFile = path.join(process.cwd(), '.env');
-  if (!fs.existsSync(envFile)) return {};
-
-  const allowedVars = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY'];
   const secrets: Record<string, string> = {};
-  const content = fs.readFileSync(envFile, 'utf-8');
 
-  for (const line of content.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) continue;
-    const eqIdx = trimmed.indexOf('=');
-    if (eqIdx === -1) continue;
-    const key = trimmed.slice(0, eqIdx).trim();
-    if (!allowedVars.includes(key)) continue;
-    let value = trimmed.slice(eqIdx + 1).trim();
-    if (
-      (value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
-      value = value.slice(1, -1);
+  // Read from .env file
+  const envFile = path.join(process.cwd(), '.env');
+  if (fs.existsSync(envFile)) {
+    const allowedVars = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY'];
+    const content = fs.readFileSync(envFile, 'utf-8');
+
+    for (const line of content.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const eqIdx = trimmed.indexOf('=');
+      if (eqIdx === -1) continue;
+      const key = trimmed.slice(0, eqIdx).trim();
+      if (!allowedVars.includes(key)) continue;
+      let value = trimmed.slice(eqIdx + 1).trim();
+      if (
+        (value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'"))
+      ) {
+        value = value.slice(1, -1);
+      }
+      if (value) secrets[key] = value;
     }
-    if (value) secrets[key] = value;
+  }
+
+  // AWS Bedrock credentials from environment
+  // These are needed for AWS Bedrock authentication
+  const awsVars = [
+    'AWS_PROFILE',
+    'AWS_ACCESS_KEY_ID',
+    'AWS_SECRET_ACCESS_KEY',
+    'AWS_SESSION_TOKEN',
+    'AWS_REGION',
+    'AWS_DEFAULT_REGION',
+  ];
+
+  for (const key of awsVars) {
+    const value = process.env[key];
+    if (value) {
+      secrets[key] = value;
+    }
+  }
+
+  // Claude Code Bedrock configuration
+  const claudeBedrockVars = [
+    'CLAUDE_CODE_USE_BEDROCK',
+    'ANTHROPIC_MODEL',
+    'ANTHROPIC_SMALL_FAST_MODEL',
+    'CLAUDE_CODE_MAX_OUTPUT_TOKENS',
+    'MAX_THINKING_TOKENS',
+    'DISABLE_BUG_COMMAND',
+    'DISABLE_ERROR_REPORTING',
+    'DISABLE_TELEMETRY',
+  ];
+
+  for (const key of claudeBedrockVars) {
+    const value = process.env[key];
+    if (value) {
+      secrets[key] = value;
+    }
   }
 
   return secrets;
@@ -275,7 +364,8 @@ export async function runContainerAgent(
   fs.mkdirSync(logsDir, { recursive: true });
 
   return new Promise((resolve) => {
-    const container = spawn('container', containerArgs, {
+    const runtime = getContainerRuntime();
+    const container = spawn(runtime, containerArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
@@ -382,7 +472,8 @@ export async function runContainerAgent(
     const killOnTimeout = () => {
       timedOut = true;
       logger.error({ group: group.name, containerName }, 'Container timeout, stopping gracefully');
-      exec(`container stop ${containerName}`, { timeout: 15000 }, (err) => {
+      const runtime = getContainerRuntime();
+      exec(`${runtime} stop ${containerName}`, { timeout: 15000 }, (err) => {
         if (err) {
           logger.warn({ group: group.name, containerName, err }, 'Graceful stop failed, force killing');
           container.kill('SIGKILL');

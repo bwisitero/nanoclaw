@@ -17,7 +17,7 @@ import makeWASocket, {
   DisconnectReason,
   makeCacheableSignalKeyStore,
   useMultiFileAuthState,
-} from '@whiskeysockets/baileys';
+} from 'baileys';
 
 const AUTH_DIR = './store/auth';
 const QR_FILE = './store/qr-data.txt';
@@ -60,7 +60,8 @@ async function connectSocket(phoneNumber?: string): Promise<void> {
     },
     printQRInTerminal: false,
     logger,
-    browser: Browsers.macOS('Chrome'),
+    browser: Browsers.ubuntu('Chrome'),
+    qrTimeout: 60000,
   });
 
   if (usePairingCode && phoneNumber && !state.creds.me) {

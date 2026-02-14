@@ -8,7 +8,7 @@ import makeWASocket, {
   WASocket,
   makeCacheableSignalKeyStore,
   useMultiFileAuthState,
-} from '@whiskeysockets/baileys';
+} from 'baileys';
 
 import { STORE_DIR } from '../config.js';
 import {

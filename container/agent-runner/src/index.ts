@@ -391,10 +391,19 @@ async function runQuery(
   let resultCount = 0;
 
   // Load global CLAUDE.md as additional system context (shared across all groups)
+  // Read global CLAUDE.md for non-main groups
   const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
   let globalClaudeMd: string | undefined;
   if (!containerInput.isMain && fs.existsSync(globalClaudeMdPath)) {
     globalClaudeMd = fs.readFileSync(globalClaudeMdPath, 'utf-8');
+  }
+
+  // For main group, explicitly read and append its CLAUDE.md to ensure instructions are followed
+  // (Claude Code's automatic CLAUDE.md detection doesn't prioritize local instructions strongly enough)
+  const groupClaudeMdPath = '/workspace/group/CLAUDE.md';
+  if (containerInput.isMain && fs.existsSync(groupClaudeMdPath)) {
+    const groupClaudeMd = fs.readFileSync(groupClaudeMdPath, 'utf-8');
+    globalClaudeMd = globalClaudeMd ? `${globalClaudeMd}\n\n${groupClaudeMd}` : groupClaudeMd;
   }
 
   // Discover additional directories mounted at /workspace/extra/*
@@ -412,6 +421,34 @@ async function runQuery(
   if (extraDirs.length > 0) {
     log(`Additional directories: ${extraDirs.join(', ')}`);
   }
+
+  // Load MCP servers from settings.json and merge with nanoclaw MCP
+  const settingsPath = '/home/node/.claude/settings.json';
+  let userMcpServers: Record<string, any> = {};
+  if (fs.existsSync(settingsPath)) {
+    try {
+      const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+      if (settings.mcpServers) {
+        userMcpServers = settings.mcpServers;
+        log(`Loaded ${Object.keys(userMcpServers).length} MCP server(s) from settings.json: ${Object.keys(userMcpServers).join(', ')}`);
+      }
+    } catch (err) {
+      log(`Warning: Failed to parse settings.json: ${err}`);
+    }
+  }
+
+  const mcpServers = {
+    ...userMcpServers,
+    nanoclaw: {
+      command: 'node',
+      args: [mcpServerPath],
+      env: {
+        NANOCLAW_CHAT_JID: containerInput.chatJid,
+        NANOCLAW_GROUP_FOLDER: containerInput.groupFolder,
+        NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
+      },
+    },
+  };
 
   for await (const message of query({
     prompt: stream,
@@ -431,23 +468,14 @@ async function runQuery(
         'TeamCreate', 'TeamDelete', 'SendMessage',
         'TodoWrite', 'ToolSearch', 'Skill',
         'NotebookEdit',
-        'mcp__nanoclaw__*'
+        'mcp__*'  // Allow all MCP tools (nanoclaw, google-workspace, tavily, etc.)
       ],
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
       allowDangerouslySkipPermissions: true,
-      settingSources: ['project', 'user'],
-      mcpServers: {
-        nanoclaw: {
-          command: 'node',
-          args: [mcpServerPath],
-          env: {
-            NANOCLAW_CHAT_JID: containerInput.chatJid,
-            NANOCLAW_GROUP_FOLDER: containerInput.groupFolder,
-            NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
-          },
-        },
-      },
+      // Don't use settingSources - we're manually loading MCP servers from settings.json above
+      // to avoid conflicts between explicit mcpServers and settingSources behavior
+      mcpServers,
       hooks: {
         PreCompact: [{ hooks: [createPreCompactHook()] }],
         PreToolUse: [{ matcher: 'Bash', hooks: [createSanitizeBashHook()] }],

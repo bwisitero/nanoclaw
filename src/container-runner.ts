@@ -160,7 +160,13 @@ function buildVolumeMounts(
         },
         'google-workspace': {
           command: 'uvx',
-          args: ['google-workspace-mcp'],
+          args: ['--from', 'google-workspace-mcp', 'google-workspace-worker'],
+          env: {
+            GOOGLE_WORKSPACE_CLIENT_ID: '${GOOGLE_WORKSPACE_CLIENT_ID}',
+            GOOGLE_WORKSPACE_CLIENT_SECRET: '${GOOGLE_WORKSPACE_CLIENT_SECRET}',
+            GOOGLE_WORKSPACE_REFRESH_TOKEN: '',
+            GOOGLE_WORKSPACE_ENABLED_CAPABILITIES: '["gmail", "calendar", "drive", "docs", "sheets", "slides"]',
+          },
         },
       },
     }, null, 2) + '\n');
@@ -253,7 +259,14 @@ function readSecrets(): Record<string, string> {
   // Read from .env file
   const envFile = path.join(process.cwd(), '.env');
   if (fs.existsSync(envFile)) {
-    const allowedVars = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'TAVILY_API_KEY'];
+    const allowedVars = [
+      'CLAUDE_CODE_OAUTH_TOKEN',
+      'ANTHROPIC_API_KEY',
+      'TAVILY_API_KEY',
+      'GOOGLE_WORKSPACE_CLIENT_ID',
+      'GOOGLE_WORKSPACE_CLIENT_SECRET',
+      'GOOGLE_WORKSPACE_REFRESH_TOKEN',
+    ];
     const content = fs.readFileSync(envFile, 'utf-8');
 
     for (const line of content.split('\n')) {

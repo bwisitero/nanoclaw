@@ -20,6 +20,40 @@ Your output is sent to the user or group.
 
 You also have `mcp__nanoclaw__send_message` which sends a message immediately while you're still working. This is useful when you want to acknowledge a request before starting longer work.
 
+### Progress Updates for Long Tasks
+
+**For tasks expected to take >30 seconds, send progress updates:**
+
+Use `send_message` to update the user on what you're doing, approximately every 30-60 seconds or when moving to a major new step.
+
+**Examples:**
+
+```
+Bulk email deletion:
+- "🔍 Searching for promotional emails... (this may take a minute)"
+- "✅ Found 247 promotional emails. Starting deletion..."
+- "⏳ Deleted 100/247 emails... (40% complete)"
+- "⏳ Deleted 200/247 emails... (81% complete)"
+- "✅ Done! Deleted 247 promotional emails."
+
+Research tasks:
+- "🔍 Searching documentation for best practices..."
+- "📖 Found 5 relevant articles, reading them now..."
+- "📝 Synthesizing findings from 3 sources..."
+
+File processing:
+- "📂 Scanning directory... found 1,234 files"
+- "⏳ Processing files... 250/1234 complete (20%)"
+```
+
+**When to send updates:**
+- Before starting a potentially long operation
+- Every ~30-60 seconds during long operations
+- When moving to a distinct new phase
+- After completing a major step
+
+**Keep updates concise** (1-2 lines) and use emojis for quick visual scanning.
+
 ### Internal thoughts
 
 If part of your output is internal reasoning rather than something for the user, wrap it in `<internal>` tags:
@@ -242,6 +276,14 @@ Key paths inside the container:
 
 NanoClaw includes the `google-workspace-mcp` server (taylorwilsdon/google-workspace-mcp - 1,389 stars), providing comprehensive access to Google Workspace services.
 
+**IMPORTANT FOR GMAIL DELETION:**
+- **DO NOT use `gmail_bulk_delete_messages`** - it uses permanent delete API which requires permissions we don't have
+- **Instead:** Use the provided Python script that moves emails to TRASH (works with our gmail.modify scope)
+- **To delete emails:** Run `python3 /home/node/.claude/skills/gmail-bulk-delete/gmail-bulk-trash.py 'from:sender@example.com'`
+- This script uses `batchModify` with TRASH label instead of permanent deletion
+- The script reads credentials from environment variables (GOOGLE_WORKSPACE_CLIENT_ID, GOOGLE_WORKSPACE_CLIENT_SECRET, GOOGLE_WORKSPACE_REFRESH_TOKEN)
+- Example: To delete all emails from a sender, run: `python3 /home/node/.claude/skills/gmail-bulk-delete/gmail-bulk-trash.py 'from:deals@slickdeals.net'`
+
 ### Available Services
 
 You have direct access to these MCP tools (use them naturally, no special commands needed):
@@ -339,6 +381,134 @@ See "Creating Skills" section for guidance on when to create skills vs using too
 **Rate limits:**
 - Google APIs have daily quotas
 - Space out bulk operations
+
+---
+
+## Per-User Gmail Access (DM Strategy)
+
+NanoClaw supports **isolated Gmail access for multiple users** via private DMs. Each user authenticates their own Google account, and their OAuth token is stored in their own group folder. This architecture ensures complete privacy and isolation.
+
+### How It Works
+
+**Architecture:**
+- Each user gets their own private DM registered as a separate group
+- Each group has isolated storage: `data/sessions/{group-folder}/.claude/`
+- OAuth tokens are stored per-group and never shared
+- Containers are **ephemeral** - they spawn on-demand and exit after processing
+- Same Docker image, different volume mounts = different Google account identity
+
+**Example:**
+- Jackie's DM → `data/sessions/jackie-dm/.claude/credentials.json` → Jackie's Gmail
+- Your DM → `data/sessions/main/.claude/credentials.json` → Your Gmail
+- Each container only mounts the relevant user's directory
+
+### Setting Up a New User
+
+**Step 1: Get the user's chat ID**
+
+Have the user:
+- Start a DM with the bot on Telegram/WhatsApp
+- Send `/chatid` (Telegram) or get their JID from the database (WhatsApp)
+- Example: `tg:6708386373` (Telegram DM) or `14155551234@s.whatsapp.net` (WhatsApp DM)
+
+**Step 2: Register the DM**
+
+Main admin registers the user's DM:
+```json
+{
+  "tg:6708386373": {
+    "name": "Jackie - Personal",
+    "folder": "jackie-dm",
+    "trigger": "@Frankie",
+    "added_at": "2026-02-15T12:00:00.000Z",
+    "requiresTrigger": false
+  }
+}
+```
+
+Set `requiresTrigger: false` for DMs so all messages are processed (no trigger prefix needed).
+
+**Step 3: User authenticates Gmail**
+
+User sends a message in their DM that triggers Gmail:
+```
+Check my email
+```
+
+The agent will:
+1. Attempt to use `gmail_search_messages`
+2. Detect no OAuth token exists
+3. Provide an authentication URL
+4. User opens URL, logs into their Google account, grants permissions
+5. OAuth token stored in `data/sessions/jackie-dm/.claude/credentials.json`
+
+**Step 4: Done!**
+
+From now on:
+- Jackie's DM: All Gmail tools access Jackie's account
+- Your DM: All Gmail tools access your account
+- No mixing, no shared tokens
+
+### Usage Examples
+
+**Jackie's DM:**
+```
+User: Check my inbox for emails from Sarah
+Agent: [Uses gmail_search_messages with Jackie's token]
+
+User: Send an email to...
+Agent: [Uses gmail_send_message with Jackie's token]
+
+User: Schedule: Check my email every morning at 8am
+Agent: [Creates scheduled task that runs in Jackie's container context]
+```
+
+**Your DM:**
+```
+User: Search my email for "invoice"
+Agent: [Uses gmail_search_messages with your token]
+
+User: Draft an email to...
+Agent: [Uses gmail_create_draft with your token]
+```
+
+### Scheduled Tasks
+
+Scheduled tasks work the same way - they run in the user's container context:
+
+```
+User (in Jackie's DM): Remind me to check email every day at 9am
+Agent: [Schedules task with target_group_jid = Jackie's DM]
+```
+
+Every day at 9am:
+- Container spawns with Jackie's group folder mounted
+- Uses Jackie's OAuth token
+- Checks Jackie's Gmail
+- Sends result to Jackie's DM
+
+### Security Notes
+
+- **Complete isolation**: Each user's OAuth tokens are in separate directories
+- **No cross-access**: Containers only mount the relevant user's directory
+- **Ephemeral**: Containers exist only during active processing
+- **Revocable**: Users can revoke access at accounts.google.com/permissions
+- **Admin visibility**: Main admin can see all registered groups but cannot access user OAuth tokens (they're in .gitignored session directories)
+
+### Troubleshooting
+
+**User's Gmail stopped working:**
+- OAuth token expired
+- Have user send any message triggering Gmail to re-authenticate
+
+**Wrong Gmail account:**
+- User needs to revoke old token at accounts.google.com
+- Delete `data/sessions/{user-folder}/.claude/credentials.json`
+- Have user authenticate again
+
+**Can't register DM:**
+- For WhatsApp: User must message the bot first, then query database for their JID
+- For Telegram: User sends `/chatid` to get their chat ID
 
 ---
 

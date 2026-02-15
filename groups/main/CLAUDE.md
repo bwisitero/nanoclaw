@@ -114,6 +114,37 @@ create_skill(
 - `instructions` - Detailed steps for Claude Code to execute
 - `triggers` (optional) - When to suggest or auto-invoke the skill
 
+### Skill Requests from Other Groups
+
+Other groups (like Mark's personal chat) can request skills from you. When they do, you'll receive a formatted message like:
+
+```
+📋 Skill Request
+
+From: Mark
+Requested Skill: weather-checker
+
+Description:
+Check weather for any city and return forecast
+
+Reason:
+User frequently asks for weather updates. A dedicated skill would make this faster.
+
+To approve, use:
+create_skill(...)
+
+To decline: Just ignore or reply to Mark
+```
+
+**Review process:**
+1. **Security check** - Does this skill access sensitive data or systems?
+2. **Usefulness** - Is this capability valuable enough to persist?
+3. **Implementation** - Can this be done safely and reliably?
+
+If approved, use `create_skill` as suggested. The new skill becomes available to all groups (or you can restrict it).
+
+If declined, message the requesting group directly to explain why or suggest alternatives.
+
 ### Skill Examples
 
 **Daily Reports:**

@@ -499,6 +499,50 @@ ${args.instructions}
   },
 );
 
+server.tool(
+  'request_skill_from_admin',
+  'Request admin approval to create a new skill. Use this when you need a capability that would benefit from a persistent skill but you lack permission to create it yourself. The admin will review and can approve or decline.',
+  {
+    name: z.string().describe('Proposed skill name (lowercase-with-hyphens, e.g., "weather-checker")'),
+    description: z.string().describe('Brief description of what the skill should do (1-2 sentences)'),
+    reason: z.string().describe('Why you need this skill and how it would help (2-3 sentences)'),
+    instructions: z.string().optional().describe('Optional: Suggested implementation steps or approach'),
+  },
+  async (args) => {
+    // Non-main groups use this to request skills from admin
+    if (isMain) {
+      return {
+        content: [{
+          type: 'text' as const,
+          text: 'You are the admin - use create_skill directly to create skills.'
+        }],
+        isError: true,
+      };
+    }
+
+    // Write skill request IPC message
+    const data = {
+      type: 'skill_request',
+      requestingGroup: groupFolder,
+      requestingChatJid: chatJid,
+      skillName: args.name,
+      skillDescription: args.description,
+      reason: args.reason,
+      instructions: args.instructions || '',
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(MESSAGES_DIR, data);
+
+    return {
+      content: [{
+        type: 'text' as const,
+        text: `✅ Skill request sent to admin\n\n*Requested:* ${args.name}\n\nThe admin will review your request and create the skill if approved.`
+      }]
+    };
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);

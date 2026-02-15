@@ -117,6 +117,49 @@ export function startIpcWatcher(deps: IpcDeps): void {
                     'Unauthorized IPC file send attempt blocked',
                   );
                 }
+              } else if (data.type === 'skill_request') {
+                // Skill requests: any group can request, always goes to main
+                // Find main group's JID
+                const mainGroupEntry = Object.entries(registeredGroups).find(
+                  ([_, group]) => group.folder === MAIN_GROUP_FOLDER
+                );
+
+                if (mainGroupEntry) {
+                  const [mainJid, _] = mainGroupEntry;
+                  const requestingGroupName = registeredGroups[data.requestingChatJid]?.name || 'Unknown';
+
+                  // Format skill request message for admin
+                  const message = `*📋 Skill Request*
+
+*From:* ${requestingGroupName}
+*Requested Skill:* ${data.skillName}
+
+*Description:*
+${data.skillDescription}
+
+*Reason:*
+${data.reason}
+
+${data.instructions ? `*Suggested Implementation:*\n${data.instructions}\n\n` : ''}*To approve, use:*
+\`\`\`
+create_skill(
+  name: "${data.skillName}",
+  description: "${data.skillDescription}",
+  instructions: "${data.instructions || 'TODO: Add implementation steps'}",
+  triggers: "TODO: When to invoke"
+)
+\`\`\`
+
+*To decline:* Just ignore or reply to ${requestingGroupName}`;
+
+                  await deps.sendMessage(mainJid, message);
+                  logger.info(
+                    { requestingGroup: sourceGroup, skillName: data.skillName },
+                    'Skill request forwarded to admin',
+                  );
+                } else {
+                  logger.warn('No main group found for skill request');
+                }
               }
               fs.unlinkSync(filePath);
             } catch (err) {

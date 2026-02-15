@@ -501,12 +501,12 @@ ${args.instructions}
 
 server.tool(
   'request_skill_from_admin',
-  'Request admin approval to create a new skill. Use this when you need a capability that would benefit from a persistent skill but you lack permission to create it yourself. The admin will review and can approve or decline.',
+  'Request admin approval to create a new skill or MCP server. **IMPORTANT:** Before requesting, ALWAYS research existing solutions first using web search or agent-browser. Look for: (1) Official MCPs from the service provider, (2) Community MCPs on GitHub/npm, (3) Similar skills in .claude/skills/. Only request if no safe, feature-rich solution exists. The admin will review and can approve or decline.',
   {
-    name: z.string().describe('Proposed skill name (lowercase-with-hyphens, e.g., "weather-checker")'),
-    description: z.string().describe('Brief description of what the skill should do (1-2 sentences)'),
-    reason: z.string().describe('Why you need this skill and how it would help (2-3 sentences)'),
-    instructions: z.string().optional().describe('Optional: Suggested implementation steps or approach'),
+    name: z.string().describe('Proposed skill name (lowercase-with-hyphens, e.g., "weather-checker") or MCP server name'),
+    description: z.string().describe('Brief description of what the skill/MCP should do (1-2 sentences)'),
+    reason: z.string().describe('Why you need this capability and what you researched (include: search terms used, MCPs/skills found, why they were unsuitable)'),
+    instructions: z.string().optional().describe('Optional: Suggested implementation steps or approach. For MCPs, include the GitHub repo URL and installation command.'),
   },
   async (args) => {
     // Non-main groups use this to request skills from admin

@@ -150,6 +150,19 @@ function buildVolumeMounts(
         // https://code.claude.com/docs/en/memory#manage-auto-memory
         CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
       },
+      mcpServers: {
+        tavily: {
+          command: 'npx',
+          args: ['-y', '@tavily/mcp-server'],
+          env: {
+            TAVILY_API_KEY: '${TAVILY_API_KEY}',
+          },
+        },
+        'google-workspace': {
+          command: 'uvx',
+          args: ['google-workspace-mcp'],
+        },
+      },
     }, null, 2) + '\n');
   }
 
@@ -240,7 +253,7 @@ function readSecrets(): Record<string, string> {
   // Read from .env file
   const envFile = path.join(process.cwd(), '.env');
   if (fs.existsSync(envFile)) {
-    const allowedVars = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY'];
+    const allowedVars = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'TAVILY_API_KEY'];
     const content = fs.readFileSync(envFile, 'utf-8');
 
     for (const line of content.split('\n')) {

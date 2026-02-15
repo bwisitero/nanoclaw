@@ -146,7 +146,13 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     const hasTrigger = missedMessages.some((m) =>
       TRIGGER_PATTERN.test(m.content.trim()),
     );
-    if (!hasTrigger) return true;
+    if (!hasTrigger) {
+      // Advance timestamp even without trigger so recovery doesn't keep finding these messages
+      lastAgentTimestamp[chatJid] =
+        missedMessages[missedMessages.length - 1].timestamp;
+      saveState();
+      return true;
+    }
   }
 
   const prompt = formatMessages(missedMessages);

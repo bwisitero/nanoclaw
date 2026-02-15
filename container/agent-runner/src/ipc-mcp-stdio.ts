@@ -417,6 +417,88 @@ server.tool(
   },
 );
 
+server.tool(
+  'create_skill',
+  'Create a new Claude Code skill that can be invoked with /skill-name. Skills are reusable commands that extend NanoClaw functionality. Main group only.',
+  {
+    name: z.string().describe('Skill name (lowercase, hyphens, e.g., "backup-to-dropbox")'),
+    description: z.string().describe('Brief description of what the skill does (1-2 sentences)'),
+    instructions: z.string().describe('Detailed instructions for Claude Code on how to execute this skill'),
+    triggers: z.string().optional().describe('Optional: When to automatically invoke this skill (e.g., "user says backup", "user mentions Dropbox")'),
+  },
+  async (args) => {
+    // Only main group can create skills
+    if (!isMain) {
+      return {
+        content: [{ type: 'text' as const, text: 'Only the main group can create skills.' }],
+        isError: true,
+      };
+    }
+
+    // Validate skill name format
+    const skillName = args.name.toLowerCase().trim();
+    if (!/^[a-z0-9-]+$/.test(skillName)) {
+      return {
+        content: [{
+          type: 'text' as const,
+          text: `Invalid skill name "${args.name}". Use lowercase letters, numbers, and hyphens only (e.g., "backup-to-dropbox").`
+        }],
+        isError: true,
+      };
+    }
+
+    // Check if skill already exists
+    const skillsDir = '/workspace/project/.claude/skills';
+    const skillDir = path.join(skillsDir, skillName);
+
+    if (fs.existsSync(skillDir)) {
+      return {
+        content: [{
+          type: 'text' as const,
+          text: `Skill "/${skillName}" already exists. To modify it, edit .claude/skills/${skillName}/SKILL.md directly.`
+        }],
+        isError: true,
+      };
+    }
+
+    // Create skill directory
+    fs.mkdirSync(skillDir, { recursive: true });
+
+    // Generate SKILL.md content
+    const skillContent = `# ${skillName.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')}
+
+${args.description}
+
+${args.triggers ? `## When to Use\n\nThis skill should be invoked when:\n${args.triggers}\n\n` : ''}## Instructions
+
+${args.instructions}
+
+## Notes
+
+- This skill was created via the \`create_skill\` tool
+- Edit this file directly to modify the skill behavior
+- Skills are available immediately after creation
+
+## Usage
+
+\`\`\`
+/${skillName}
+\`\`\`
+`;
+
+    // Write SKILL.md
+    const skillFile = path.join(skillDir, 'SKILL.md');
+    fs.writeFileSync(skillFile, skillContent);
+
+    return {
+      content: [{
+        type: 'text' as const,
+        text: `✅ Skill created: **/${skillName}**\n\nLocation: \`.claude/skills/${skillName}/SKILL.md\`\n\nYou can now use this skill by typing \`/${skillName}\` in Claude Code.`
+      }]
+    };
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);

@@ -34,6 +34,10 @@ interface ContainerOutput {
   result: string | null;
   newSessionId?: string;
   error?: string;
+  usage?: {
+    input_tokens: number;
+    output_tokens: number;
+  };
 }
 
 interface SessionEntry {
@@ -389,6 +393,8 @@ async function runQuery(
   let lastAssistantUuid: string | undefined;
   let messageCount = 0;
   let resultCount = 0;
+  let totalInputTokens = 0;
+  let totalOutputTokens = 0;
 
   // Load global CLAUDE.md as additional system context (shared across all groups)
   // Read global CLAUDE.md for non-main groups
@@ -490,6 +496,16 @@ async function runQuery(
       lastAssistantUuid = (message as { uuid: string }).uuid;
     }
 
+    // Check for usage information in any message type
+    if ('usage' in message) {
+      const usage = (message as any).usage;
+      const inputTokens = usage.input_tokens || 0;
+      const outputTokens = usage.output_tokens || 0;
+      totalInputTokens += inputTokens;
+      totalOutputTokens += outputTokens;
+      log(`💰 Usage found: input=${inputTokens} output=${outputTokens} (total: ${totalInputTokens}/${totalOutputTokens})`);
+    }
+
     if (message.type === 'system' && message.subtype === 'init') {
       newSessionId = message.session_id;
       log(`Session initialized: ${newSessionId}`);
@@ -507,7 +523,11 @@ async function runQuery(
       writeOutput({
         status: 'success',
         result: textResult || null,
-        newSessionId
+        newSessionId,
+        usage: totalInputTokens > 0 || totalOutputTokens > 0 ? {
+          input_tokens: totalInputTokens,
+          output_tokens: totalOutputTokens
+        } : undefined
       });
     }
   }

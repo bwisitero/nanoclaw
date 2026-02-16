@@ -133,13 +133,29 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const isMainGroup = group.folder === MAIN_GROUP_FOLDER;
 
   const sinceTimestamp = lastAgentTimestamp[chatJid] || '';
-  const missedMessages = getMessagesSince(
+  const allMissedMessages = getMessagesSince(
     chatJid,
     sinceTimestamp,
     ASSISTANT_NAME,
   );
 
-  if (missedMessages.length === 0) return true;
+  if (allMissedMessages.length === 0) return true;
+
+  // Limit batch size to prevent long-running sessions (max 10 messages per cycle)
+  const MAX_BATCH_SIZE = parseInt(process.env.MAX_MESSAGE_BATCH_SIZE || '10', 10);
+  const missedMessages = allMissedMessages.slice(0, MAX_BATCH_SIZE);
+
+  if (allMissedMessages.length > MAX_BATCH_SIZE) {
+    logger.info(
+      {
+        group: group.name,
+        totalPending: allMissedMessages.length,
+        processingNow: missedMessages.length,
+        remaining: allMissedMessages.length - MAX_BATCH_SIZE,
+      },
+      'Large message backlog - processing in batches',
+    );
+  }
 
   // For non-main groups, check if trigger is required and present
   if (!isMainGroup && group.requiresTrigger !== false) {
@@ -191,9 +207,32 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let hadError = false;
   let outputSentToUser = false;
 
+  // Keep typing indicator alive during processing
+  const typingInterval = setInterval(() => {
+    channel.setTyping?.(chatJid, true);
+  }, 4000); // Refresh every 4 seconds
+
+  // Send quick acknowledgment for Telegram so user knows we're working
+  if (channel.name === 'telegram') {
+    // Wait a moment to see if agent responds quickly
+    const ackTimer = setTimeout(async () => {
+      await channel.sendMessage(chatJid, '⏳ Working on it...');
+      outputSentToUser = true; // Mark so we don't roll back cursor on error
+    }, 3000); // If no response in 3 seconds, send acknowledgment
+
+    // Clear ack timer if we get a result quickly (handled in callback below)
+    (resetIdleTimer as any).ackTimer = ackTimer;
+  }
+
   const output = await runAgent(group, prompt, chatJid, async (result) => {
     // Streaming output callback — called for each agent result
     if (result.result) {
+      // Clear acknowledgment timer since we have a real result
+      if ((resetIdleTimer as any).ackTimer) {
+        clearTimeout((resetIdleTimer as any).ackTimer);
+        (resetIdleTimer as any).ackTimer = null;
+      }
+
       const raw = typeof result.result === 'string' ? result.result : JSON.stringify(result.result);
       logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
       const formatted = formatOutbound(channel, raw);
@@ -210,6 +249,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }
   });
 
+  // Clean up typing indicator and timers
+  clearInterval(typingInterval);
+  if ((resetIdleTimer as any).ackTimer) {
+    clearTimeout((resetIdleTimer as any).ackTimer);
+  }
   await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
 
@@ -381,9 +425,7 @@ async function startMessageLoop(): Promise<void> {
             lastAgentTimestamp[chatJid] =
               messagesToSend[messagesToSend.length - 1].timestamp;
             saveState();
-            // Show typing indicator while the container processes the piped message
-            const channel = findChannel(channels, chatJid);
-            if (channel) channel.setTyping?.(chatJid, true);
+            // Typing indicator already managed by active container
           } else {
             // No active container — enqueue for a new one
             queue.enqueueMessageCheck(chatJid);

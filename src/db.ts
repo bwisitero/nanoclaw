@@ -72,6 +72,22 @@ function createSchema(database: Database.Database): void {
       container_config TEXT,
       requires_trigger INTEGER DEFAULT 1
     );
+    CREATE TABLE IF NOT EXISTS costs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      timestamp TEXT NOT NULL,
+      chat_jid TEXT NOT NULL,
+      group_folder TEXT NOT NULL,
+      input_tokens INTEGER NOT NULL,
+      output_tokens INTEGER NOT NULL,
+      model TEXT NOT NULL,
+      cost_usd REAL NOT NULL,
+      session_id TEXT,
+      container_name TEXT,
+      duration_ms INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_costs_timestamp ON costs(timestamp);
+    CREATE INDEX IF NOT EXISTS idx_costs_chat ON costs(chat_jid);
+    CREATE INDEX IF NOT EXISTS idx_costs_session ON costs(session_id);
   `);
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
@@ -525,6 +541,123 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
       requiresTrigger: row.requires_trigger === null ? undefined : row.requires_trigger === 1,
     };
   }
+  return result;
+}
+
+// --- Cost tracking ---
+
+export interface CostRecord {
+  id: number;
+  timestamp: string;
+  chat_jid: string;
+  group_folder: string;
+  input_tokens: number;
+  output_tokens: number;
+  model: string;
+  cost_usd: number;
+  session_id?: string;
+  container_name?: string;
+  duration_ms?: number;
+}
+
+export function recordCost(record: Omit<CostRecord, 'id'>): void {
+  db.prepare(`
+    INSERT INTO costs (
+      timestamp, chat_jid, group_folder, input_tokens, output_tokens,
+      model, cost_usd, session_id, container_name, duration_ms
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    record.timestamp,
+    record.chat_jid,
+    record.group_folder,
+    record.input_tokens,
+    record.output_tokens,
+    record.model,
+    record.cost_usd,
+    record.session_id || null,
+    record.container_name || null,
+    record.duration_ms || null,
+  );
+}
+
+export function getTotalCost(): number {
+  const result = db
+    .prepare('SELECT COALESCE(SUM(cost_usd), 0) as total FROM costs')
+    .get() as { total: number };
+  return result.total;
+}
+
+export function getCostsByChat(chatJid: string): CostRecord[] {
+  return db
+    .prepare('SELECT * FROM costs WHERE chat_jid = ? ORDER BY timestamp DESC')
+    .all(chatJid) as CostRecord[];
+}
+
+export function getCostsByGroupFolder(groupFolder: string): CostRecord[] {
+  return db
+    .prepare('SELECT * FROM costs WHERE group_folder = ? ORDER BY timestamp DESC')
+    .all(groupFolder) as CostRecord[];
+}
+
+export function getCostsByDateRange(startDate: string, endDate: string): CostRecord[] {
+  return db
+    .prepare(
+      'SELECT * FROM costs WHERE timestamp >= ? AND timestamp < ? ORDER BY timestamp DESC',
+    )
+    .all(startDate, endDate) as CostRecord[];
+}
+
+export function getCostSummaryByChat(): Array<{
+  chat_jid: string;
+  group_folder: string;
+  total_cost: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  interaction_count: number;
+}> {
+  return db
+    .prepare(`
+      SELECT
+        chat_jid,
+        group_folder,
+        SUM(cost_usd) as total_cost,
+        SUM(input_tokens) as total_input_tokens,
+        SUM(output_tokens) as total_output_tokens,
+        COUNT(*) as interaction_count
+      FROM costs
+      GROUP BY chat_jid, group_folder
+      ORDER BY total_cost DESC
+    `)
+    .all() as Array<{
+    chat_jid: string;
+    group_folder: string;
+    total_cost: number;
+    total_input_tokens: number;
+    total_output_tokens: number;
+    interaction_count: number;
+  }>;
+}
+
+export function getCostsByTimeRange(hours: number): {
+  total_cost: number;
+  total_interactions: number;
+  avg_cost_per_interaction: number;
+} {
+  const since = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+  const result = db
+    .prepare(`
+      SELECT
+        COALESCE(SUM(cost_usd), 0) as total_cost,
+        COUNT(*) as total_interactions,
+        COALESCE(AVG(cost_usd), 0) as avg_cost_per_interaction
+      FROM costs
+      WHERE timestamp >= ?
+    `)
+    .get(since) as {
+    total_cost: number;
+    total_interactions: number;
+    avg_cost_per_interaction: number;
+  };
   return result;
 }
 

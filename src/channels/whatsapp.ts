@@ -37,6 +37,8 @@ export class WhatsAppChannel implements Channel {
   private outgoingQueue: Array<{ jid: string; text: string }> = [];
   private flushing = false;
   private groupSyncTimerStarted = false;
+  private reconnectAttempts = 0;
+  private readonly maxReconnectAttempts = 5;
 
   private opts: WhatsAppChannelOpts;
 
@@ -82,25 +84,60 @@ export class WhatsAppChannel implements Channel {
       if (connection === 'close') {
         this.connected = false;
         const reason = (lastDisconnect?.error as any)?.output?.statusCode;
+        const errorMsg = (lastDisconnect?.error as any)?.message || '';
+
+        // Detect auth state corruption (Baileys "Invalid private key type" error)
+        if (errorMsg.includes('Invalid private key type') || errorMsg.includes('validatePrivKey')) {
+          logger.error('Auth state corrupted - clearing and requiring re-authentication');
+          const authDir = path.join(STORE_DIR, 'auth');
+          try {
+            // Move corrupted auth to backup
+            const backupDir = path.join(STORE_DIR, `auth-corrupted-${Date.now()}`);
+            fs.renameSync(authDir, backupDir);
+            logger.info({ backupDir }, 'Moved corrupted auth to backup');
+          } catch (err) {
+            logger.warn({ err }, 'Failed to backup corrupted auth');
+          }
+
+          const msg = 'WhatsApp auth corrupted. Run npm run auth to re-authenticate.';
+          logger.error(msg);
+          exec(
+            `osascript -e 'display notification "${msg}" with title "NanoClaw" sound name "Basso"'`,
+          );
+          setTimeout(() => process.exit(1), 1000);
+          return;
+        }
+
         const shouldReconnect = reason !== DisconnectReason.loggedOut;
-        logger.info({ reason, shouldReconnect, queuedMessages: this.outgoingQueue.length }, 'Connection closed');
+        logger.info({ reason, shouldReconnect, queuedMessages: this.outgoingQueue.length, reconnectAttempt: this.reconnectAttempts }, 'Connection closed');
 
         if (shouldReconnect) {
-          logger.info('Reconnecting...');
-          this.connectInternal().catch((err) => {
-            logger.error({ err }, 'Failed to reconnect, retrying in 5s');
-            setTimeout(() => {
-              this.connectInternal().catch((err2) => {
-                logger.error({ err: err2 }, 'Reconnection retry failed');
-              });
-            }, 5000);
-          });
+          if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+            const msg = 'WhatsApp max reconnection attempts reached. Please check your connection and restart.';
+            logger.error(msg);
+            exec(
+              `osascript -e 'display notification "${msg}" with title "NanoClaw" sound name "Basso"'`,
+            );
+            setTimeout(() => process.exit(1), 1000);
+            return;
+          }
+
+          this.reconnectAttempts++;
+          const backoffDelay = Math.min(1000 * Math.pow(2, this.reconnectAttempts - 1), 30000); // Exponential backoff, max 30s
+          logger.info({ attempt: this.reconnectAttempts, delayMs: backoffDelay }, 'Reconnecting with backoff...');
+
+          setTimeout(() => {
+            this.connectInternal().catch((err) => {
+              logger.error({ err, attempt: this.reconnectAttempts }, 'Reconnection failed');
+            });
+          }, backoffDelay);
         } else {
           logger.info('Logged out. Run /setup to re-authenticate.');
           process.exit(0);
         }
       } else if (connection === 'open') {
         this.connected = true;
+        this.reconnectAttempts = 0; // Reset counter on successful connection
         logger.info('Connected to WhatsApp');
 
         // Announce availability so WhatsApp relays subsequent presence updates (typing indicators)
@@ -217,8 +254,9 @@ export class WhatsAppChannel implements Channel {
   }
 
   async setTyping(jid: string, isTyping: boolean): Promise<void> {
+    if (!this.connected) return; // Skip if not connected
     try {
-      const status = isTyping ? 'composing' : 'paused';
+      const status = isTyping ? 'composing' : 'available';
       logger.debug({ jid, status }, 'Sending presence update');
       await this.sock.sendPresenceUpdate(status, jid);
     } catch (err) {

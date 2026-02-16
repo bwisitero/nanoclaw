@@ -15,6 +15,7 @@ import {
   GROUPS_DIR,
   IDLE_TIMEOUT,
 } from './config.js';
+import { recordCost } from './db.js';
 import { logger } from './logger.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
@@ -52,6 +53,50 @@ function getContainerRuntime(): 'docker' | 'container' {
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
 const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 
+// Bedrock pricing (us-east-1) - dollars per million tokens
+const BEDROCK_PRICING: Record<string, { input: number; output: number }> = {
+  'us.anthropic.claude-sonnet-4-5-20250929-v1:0': { input: 3.0, output: 15.0 },
+  'us.anthropic.claude-haiku-4-5-20251001-v1:0': { input: 1.0, output: 5.0 },
+  'us.anthropic.claude-opus-4-6-20250514-v1:0': { input: 15.0, output: 75.0 },
+};
+
+function calculateCost(inputTokens: number, outputTokens: number, model: string): number {
+  const pricing = BEDROCK_PRICING[model] || BEDROCK_PRICING['us.anthropic.claude-sonnet-4-5-20250929-v1:0'];
+  const inputCost = (inputTokens / 1_000_000) * pricing.input;
+  const outputCost = (outputTokens / 1_000_000) * pricing.output;
+  return inputCost + outputCost;
+}
+
+function writeCostSummary(groupFolder: string): void {
+  const { getCostsByGroupFolder, getTotalCost } = require('./db.js');
+  const groupsDir = path.join(process.cwd(), 'groups', groupFolder);
+  const summaryPath = path.join(groupsDir, 'costs.json');
+
+  try {
+    const groupCosts = getCostsByGroupFolder(groupFolder);
+    const totalGroupCost = groupCosts.reduce((sum: number, c: any) => sum + c.cost_usd, 0);
+    const totalSystemCost = getTotalCost();
+
+    const summary = {
+      last_updated: new Date().toISOString(),
+      group_total_usd: Number(totalGroupCost.toFixed(4)),
+      system_total_usd: Number(totalSystemCost.toFixed(4)),
+      recent_interactions: groupCosts.slice(0, 20).map((c: any) => ({
+        timestamp: c.timestamp,
+        input_tokens: c.input_tokens,
+        output_tokens: c.output_tokens,
+        cost_usd: Number(c.cost_usd.toFixed(4)),
+        model: c.model,
+        duration_ms: c.duration_ms,
+      })),
+    };
+
+    fs.writeFileSync(summaryPath, JSON.stringify(summary, null, 2));
+  } catch (err) {
+    logger.warn({ err, groupFolder }, 'Failed to write cost summary');
+  }
+}
+
 function getHomeDir(): string {
   const home = process.env.HOME || os.homedir();
   if (!home) {
@@ -77,6 +122,10 @@ export interface ContainerOutput {
   result: string | null;
   newSessionId?: string;
   error?: string;
+  usage?: {
+    input_tokens: number;
+    output_tokens: number;
+  };
 }
 
 interface VolumeMount {
@@ -413,6 +462,8 @@ export async function runContainerAgent(
     let parseBuffer = '';
     let newSessionId: string | undefined;
     let outputChain = Promise.resolve();
+    let totalInputTokens = 0;
+    let totalOutputTokens = 0;
 
     container.stdout.on('data', (data) => {
       const chunk = data.toString();
@@ -449,6 +500,11 @@ export async function runContainerAgent(
             const parsed: ContainerOutput = JSON.parse(jsonStr);
             if (parsed.newSessionId) {
               newSessionId = parsed.newSessionId;
+            }
+            // Accumulate token usage for cost tracking
+            if (parsed.usage) {
+              totalInputTokens += parsed.usage.input_tokens;
+              totalOutputTokens += parsed.usage.output_tokens;
             }
             hadStreamingOutput = true;
             // Activity detected — reset the hard timeout
@@ -495,9 +551,13 @@ export async function runContainerAgent(
     // graceful _close sentinel has time to trigger before the hard kill fires.
     const timeoutMs = Math.max(configTimeout, IDLE_TIMEOUT + 30_000);
 
-    const killOnTimeout = () => {
+    // Hard maximum runtime - can never be extended (default 2 hours)
+    const maxRuntime = parseInt(process.env.CONTAINER_MAX_RUNTIME || '7200000', 10); // 2 hours
+    let maxRuntimeReached = false;
+
+    const killOnTimeout = (reason: string) => {
       timedOut = true;
-      logger.error({ group: group.name, containerName }, 'Container timeout, stopping gracefully');
+      logger.error({ group: group.name, containerName, reason }, 'Container timeout, stopping gracefully');
       const runtime = getContainerRuntime();
       exec(`${runtime} stop ${containerName}`, { timeout: 15000 }, (err) => {
         if (err) {
@@ -507,29 +567,67 @@ export async function runContainerAgent(
       });
     };
 
-    let timeout = setTimeout(killOnTimeout, timeoutMs);
+    let timeout = setTimeout(() => killOnTimeout('idle'), timeoutMs);
 
-    // Reset the timeout whenever there's activity (streaming output)
+    // Hard maximum runtime - triggers regardless of activity
+    let timeoutResetCount = 0;
+    const hardTimeout = setTimeout(() => {
+      maxRuntimeReached = true;
+      killOnTimeout('max_runtime');
+    }, maxRuntime);
+
+    // Warn at 75% of max runtime
+    const warnTimeout = setTimeout(() => {
+      const elapsed = Date.now() - startTime;
+      logger.warn({
+        group: group.name,
+        containerName,
+        elapsedMinutes: Math.floor(elapsed / 60000),
+        maxMinutes: Math.floor(maxRuntime / 60000),
+        resetCount: timeoutResetCount,
+      }, 'Container approaching maximum runtime limit');
+    }, maxRuntime * 0.75);
+
+    // Reset the idle timeout whenever there's activity (streaming output)
+    // But never extend beyond the hard maximum runtime
     const resetTimeout = () => {
+      if (maxRuntimeReached) return; // Don't reset if hard limit reached
       clearTimeout(timeout);
-      timeout = setTimeout(killOnTimeout, timeoutMs);
+      timeout = setTimeout(() => killOnTimeout('idle'), timeoutMs);
+      timeoutResetCount++;
+
+      // Log if timeout resets frequently (possible infinite loop)
+      if (timeoutResetCount % 10 === 0) {
+        const elapsed = Date.now() - startTime;
+        logger.warn({
+          group: group.name,
+          containerName,
+          resetCount: timeoutResetCount,
+          elapsedMinutes: Math.floor(elapsed / 60000),
+        }, 'Container timeout reset multiple times - check for loops');
+      }
     };
 
     container.on('close', (code) => {
       clearTimeout(timeout);
+      clearTimeout(hardTimeout);
+      clearTimeout(warnTimeout);
       const duration = Date.now() - startTime;
 
       if (timedOut) {
         const ts = new Date().toISOString().replace(/[:.]/g, '-');
         const timeoutLog = path.join(logsDir, `container-${ts}.log`);
+        const reason = maxRuntimeReached ? 'Max Runtime (Hard Limit)' : 'Idle Timeout';
         fs.writeFileSync(timeoutLog, [
           `=== Container Run Log (TIMEOUT) ===`,
           `Timestamp: ${new Date().toISOString()}`,
           `Group: ${group.name}`,
           `Container: ${containerName}`,
-          `Duration: ${duration}ms`,
+          `Duration: ${duration}ms (${Math.floor(duration / 60000)} minutes)`,
           `Exit Code: ${code}`,
+          `Timeout Reason: ${reason}`,
           `Had Streaming Output: ${hadStreamingOutput}`,
+          `Timeout Resets: ${timeoutResetCount}`,
         ].join('\n'));
 
         // Timeout after output = idle cleanup, not failure.
@@ -644,6 +742,38 @@ export async function runContainerAgent(
       // Streaming mode: wait for output chain to settle, return completion marker
       if (onOutput) {
         outputChain.then(() => {
+          // Record cost if we have token usage
+          if (totalInputTokens > 0 || totalOutputTokens > 0) {
+            const model = process.env.ANTHROPIC_MODEL || 'us.anthropic.claude-sonnet-4-5-20250929-v1:0';
+            const cost = calculateCost(totalInputTokens, totalOutputTokens, model);
+            try {
+              recordCost({
+                timestamp: new Date().toISOString(),
+                chat_jid: input.chatJid,
+                group_folder: input.groupFolder,
+                input_tokens: totalInputTokens,
+                output_tokens: totalOutputTokens,
+                model,
+                cost_usd: cost,
+                session_id: newSessionId,
+                container_name: containerName,
+                duration_ms: duration,
+              });
+              writeCostSummary(input.groupFolder);
+              logger.debug(
+                {
+                  group: group.name,
+                  cost,
+                  inputTokens: totalInputTokens,
+                  outputTokens: totalOutputTokens,
+                },
+                'Recorded cost',
+              );
+            } catch (err) {
+              logger.warn({ err, group: group.name }, 'Failed to record cost');
+            }
+          }
+
           logger.info(
             { group: group.name, duration, newSessionId },
             'Container completed (streaming mode)',
@@ -675,6 +805,38 @@ export async function runContainerAgent(
         }
 
         const output: ContainerOutput = JSON.parse(jsonLine);
+
+        // Record cost if we have token usage
+        if (output.usage) {
+          const model = process.env.ANTHROPIC_MODEL || 'us.anthropic.claude-sonnet-4-5-20250929-v1:0';
+          const cost = calculateCost(output.usage.input_tokens, output.usage.output_tokens, model);
+          try {
+            recordCost({
+              timestamp: new Date().toISOString(),
+              chat_jid: input.chatJid,
+              group_folder: input.groupFolder,
+              input_tokens: output.usage.input_tokens,
+              output_tokens: output.usage.output_tokens,
+              model,
+              cost_usd: cost,
+              session_id: output.newSessionId,
+              container_name: containerName,
+              duration_ms: duration,
+            });
+            writeCostSummary(input.groupFolder);
+            logger.debug(
+              {
+                group: group.name,
+                cost,
+                inputTokens: output.usage.input_tokens,
+                outputTokens: output.usage.output_tokens,
+              },
+              'Recorded cost',
+            );
+          } catch (err) {
+            logger.warn({ err, group: group.name }, 'Failed to record cost');
+          }
+        }
 
         logger.info(
           {

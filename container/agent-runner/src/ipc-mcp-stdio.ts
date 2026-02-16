@@ -500,6 +500,57 @@ ${args.instructions}
 );
 
 server.tool(
+  'get_costs',
+  'Get cost tracking information for this group. Shows recent interactions, total cost for this group, and system-wide total cost. Costs are tracked per API call with input/output token counts.',
+  {},
+  async () => {
+    const costsFile = '/workspace/group/costs.json';
+
+    if (!fs.existsSync(costsFile)) {
+      return {
+        content: [{
+          type: 'text' as const,
+          text: 'No cost data available yet. Cost tracking begins after the first interaction following this feature being enabled.'
+        }]
+      };
+    }
+
+    try {
+      const costsData = JSON.parse(fs.readFileSync(costsFile, 'utf-8'));
+      const formatted = [
+        `*Cost Summary for ${groupFolder}*`,
+        ``,
+        `Group Total: $${costsData.group_total_usd}`,
+        `System Total (all groups): $${costsData.system_total_usd}`,
+        `Last Updated: ${new Date(costsData.last_updated).toLocaleString()}`,
+        ``,
+        `*Recent Interactions:*`,
+        ...costsData.recent_interactions.slice(0, 10).map((int: any, idx: number) => {
+          const time = new Date(int.timestamp).toLocaleString();
+          const modelShort = int.model.split('-').slice(-2).join('-'); // e.g., "sonnet-4-5"
+          return `${idx + 1}. ${time} | $${int.cost_usd} | ${int.input_tokens}in/${int.output_tokens}out | ${modelShort}`;
+        }),
+      ];
+
+      return {
+        content: [{
+          type: 'text' as const,
+          text: formatted.join('\n')
+        }]
+      };
+    } catch (err) {
+      return {
+        content: [{
+          type: 'text' as const,
+          text: `Error reading cost data: ${err}`
+        }],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
   'request_skill_from_admin',
   'Request admin approval to create a new skill or MCP server. **IMPORTANT:** Before requesting, ALWAYS research existing solutions first using web search or agent-browser. Look for: (1) Official MCPs from the service provider, (2) Community MCPs on GitHub/npm, (3) Similar skills in .claude/skills/. Only request if no safe, feature-rich solution exists. The admin will review and can approve or decline.',
   {

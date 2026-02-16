@@ -174,7 +174,7 @@ export class TelegramChannel implements Channel {
           : (ctx.chat as any).title || chatJid;
 
       // Translate Telegram @bot_username mentions into TRIGGER_PATTERN format.
-      // Telegram @mentions (e.g., @frankie_ai_bot) won't match TRIGGER_PATTERN
+      // Telegram @mentions (e.g., @team_a3_ai_bot) won't match TRIGGER_PATTERN
       // (e.g., ^@Frankie\b), so we prepend the trigger when the bot is @mentioned.
       const botUsername = ctx.me?.username?.toLowerCase();
       if (botUsername) {
@@ -189,6 +189,10 @@ export class TelegramChannel implements Channel {
           return false;
         });
         if (isBotMentioned && !TRIGGER_PATTERN.test(content)) {
+          logger.debug(
+            { chatJid, botUsername, originalContent: content },
+            'Translating bot mention to trigger pattern',
+          );
           content = `@${ASSISTANT_NAME} ${content}`;
         }
       }
@@ -204,6 +208,14 @@ export class TelegramChannel implements Channel {
           'Message from unregistered Telegram chat',
         );
         return;
+      }
+
+      // Check if this message will trigger a response before sending typing indicator
+      // Only send typing if: (1) group doesn't require trigger, OR (2) message has trigger
+      const willRespond = group.requiresTrigger === false || TRIGGER_PATTERN.test(content.trim());
+      if (willRespond) {
+        // Send typing indicator immediately so user knows message was received
+        await this.setTyping(chatJid, true);
       }
 
       // Deliver message — startMessageLoop() will pick it up
@@ -232,7 +244,28 @@ export class TelegramChannel implements Channel {
       const timestamp = new Date(ctx.message.date * 1000).toISOString();
       const senderName =
         ctx.from?.first_name || ctx.from?.username || ctx.from?.id?.toString() || 'Unknown';
-      const caption = ctx.message.caption ? `\n\nCaption: ${ctx.message.caption}` : '';
+
+      let caption = ctx.message.caption || '';
+
+      // Translate bot @mentions in caption to TRIGGER_PATTERN format
+      if (caption) {
+        const botUsername = ctx.me?.username?.toLowerCase();
+        if (botUsername) {
+          const entities = ctx.message.caption_entities || [];
+          const isBotMentioned = entities.some((entity) => {
+            if (entity.type === 'mention') {
+              const mentionText = caption
+                .substring(entity.offset, entity.offset + entity.length)
+                .toLowerCase();
+              return mentionText === `@${botUsername}`;
+            }
+            return false;
+          });
+          if (isBotMentioned && !TRIGGER_PATTERN.test(caption)) {
+            caption = `@${ASSISTANT_NAME} ${caption}`;
+          }
+        }
+      }
 
       // Download the largest photo size
       const photo = ctx.message.photo[ctx.message.photo.length - 1];
@@ -242,9 +275,20 @@ export class TelegramChannel implements Channel {
         group.folder,
       );
 
-      const content = filePath
-        ? `[Photo uploaded: ${path.relative(GROUPS_DIR, filePath)}]${caption}`
-        : `[Photo]${caption}`;
+      const fileRef = filePath
+        ? `[Photo uploaded: ${path.relative(GROUPS_DIR, filePath)}]`
+        : '[Photo]';
+
+      // Put caption FIRST so trigger pattern can match at start of string
+      const content = caption
+        ? `${caption}\n\n${fileRef}`
+        : fileRef;
+
+      // Check if this message will trigger a response before sending typing indicator
+      const willRespond = group.requiresTrigger === false || TRIGGER_PATTERN.test(content.trim());
+      if (willRespond) {
+        await this.setTyping(chatJid, true);
+      }
 
       this.opts.onChatMetadata(chatJid, timestamp);
       this.opts.onMessage(chatJid, {
@@ -267,14 +311,46 @@ export class TelegramChannel implements Channel {
       const timestamp = new Date(ctx.message.date * 1000).toISOString();
       const senderName =
         ctx.from?.first_name || ctx.from?.username || ctx.from?.id?.toString() || 'Unknown';
-      const caption = ctx.message.caption ? `\n\nCaption: ${ctx.message.caption}` : '';
+
+      let caption = ctx.message.caption || '';
+
+      // Translate bot @mentions in caption to TRIGGER_PATTERN format
+      if (caption) {
+        const botUsername = ctx.me?.username?.toLowerCase();
+        if (botUsername) {
+          const entities = ctx.message.caption_entities || [];
+          const isBotMentioned = entities.some((entity) => {
+            if (entity.type === 'mention') {
+              const mentionText = caption
+                .substring(entity.offset, entity.offset + entity.length)
+                .toLowerCase();
+              return mentionText === `@${botUsername}`;
+            }
+            return false;
+          });
+          if (isBotMentioned && !TRIGGER_PATTERN.test(caption)) {
+            caption = `@${ASSISTANT_NAME} ${caption}`;
+          }
+        }
+      }
 
       const fileName = ctx.message.video.file_name || `video-${timestamp}.mp4`;
       const filePath = await this.downloadFile(ctx.message.video.file_id, fileName, group.folder);
 
-      const content = filePath
-        ? `[Video uploaded: ${path.relative(GROUPS_DIR, filePath)}]${caption}`
-        : `[Video]${caption}`;
+      const fileRef = filePath
+        ? `[Video uploaded: ${path.relative(GROUPS_DIR, filePath)}]`
+        : '[Video]';
+
+      // Put caption FIRST so trigger pattern can match at start of string
+      const content = caption
+        ? `${caption}\n\n${fileRef}`
+        : fileRef;
+
+      // Check if this message will trigger a response before sending typing indicator
+      const willRespond = group.requiresTrigger === false || TRIGGER_PATTERN.test(content.trim());
+      if (willRespond) {
+        await this.setTyping(chatJid, true);
+      }
 
       this.opts.onChatMetadata(chatJid, timestamp);
       this.opts.onMessage(chatJid, {
@@ -369,7 +445,28 @@ export class TelegramChannel implements Channel {
       const timestamp = new Date(ctx.message.date * 1000).toISOString();
       const senderName =
         ctx.from?.first_name || ctx.from?.username || ctx.from?.id?.toString() || 'Unknown';
-      const caption = ctx.message.caption ? `\n\nCaption: ${ctx.message.caption}` : '';
+
+      let caption = ctx.message.caption || '';
+
+      // Translate bot @mentions in caption to TRIGGER_PATTERN format
+      if (caption) {
+        const botUsername = ctx.me?.username?.toLowerCase();
+        if (botUsername) {
+          const entities = ctx.message.caption_entities || [];
+          const isBotMentioned = entities.some((entity) => {
+            if (entity.type === 'mention') {
+              const mentionText = caption
+                .substring(entity.offset, entity.offset + entity.length)
+                .toLowerCase();
+              return mentionText === `@${botUsername}`;
+            }
+            return false;
+          });
+          if (isBotMentioned && !TRIGGER_PATTERN.test(caption)) {
+            caption = `@${ASSISTANT_NAME} ${caption}`;
+          }
+        }
+      }
 
       const fileName = ctx.message.document.file_name || `document-${timestamp}`;
       const filePath = await this.downloadFile(
@@ -378,9 +475,20 @@ export class TelegramChannel implements Channel {
         group.folder,
       );
 
-      const content = filePath
-        ? `[Document uploaded: ${path.relative(GROUPS_DIR, filePath)}]${caption}`
-        : `[Document: ${fileName}]${caption}`;
+      const fileRef = filePath
+        ? `[Document uploaded: ${path.relative(GROUPS_DIR, filePath)}]`
+        : `[Document: ${fileName}]`;
+
+      // Put caption FIRST so trigger pattern can match at start of string
+      const content = caption
+        ? `${caption}\n\n${fileRef}`
+        : fileRef;
+
+      // Check if this message will trigger a response before sending typing indicator
+      const willRespond = group.requiresTrigger === false || TRIGGER_PATTERN.test(content.trim());
+      if (willRespond) {
+        await this.setTyping(chatJid, true);
+      }
 
       this.opts.onChatMetadata(chatJid, timestamp);
       this.opts.onMessage(chatJid, {

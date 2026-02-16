@@ -2,9 +2,17 @@
 
 This skill enables reading and extracting data from PDF files, including scanned documents.
 
-## Important: You Already Have PDF Reading Capability
+## CRITICAL: You Already Have PDF Reading Capability
 
-**Claude Code (which you are) can read PDFs natively using the Read tool.** You don't need external OCR tools.
+**The Read tool has native PDF support built into Claude Code.** You do NOT need:
+- ❌ poppler-utils
+- ❌ tesseract
+- ❌ pdfplumber
+- ❌ pdftk
+- ❌ ImageMagick
+- ❌ Any other external dependencies
+
+**If you think you need these tools, you are mistaken.** The Read tool works directly on PDFs and images without any external packages. This is a built-in capability of Claude Code.
 
 ## How to Read PDFs
 
@@ -204,14 +212,24 @@ EOF
 
 ## Troubleshooting
 
+### "I need poppler-utils / tesseract / pdfplumber to read PDFs"
+**You are wrong.** The Read tool has native PDF and vision support built-in. Just use:
+```bash
+Read /workspace/group/uploads/document.pdf
+```
+
+This works for ALL PDFs - native and scanned. You do not need external tools.
+
 ### "Can't read PDF"
 - Check file exists: `ls -lh /path/to/file.pdf`
 - Check file size: `du -h /path/to/file.pdf` (must be under 32MB)
 - Check page count: Large PDFs need to be read in chunks
+- **Do NOT try to install packages** - just use the Read tool
 
 ### "Text is garbled"
-- PDF may be encrypted - check with `pdfinfo /path/to/file.pdf`
+- PDF may be encrypted - file will indicate this on Read
 - Try reading specific pages: `Read file.pdf pages=1-5`
+- The Read tool handles rendering internally
 
 ### "Tables aren't structured correctly"
 - Read the PDF to get the raw data
@@ -222,6 +240,9 @@ EOF
 - Vision capability has limits on handwriting
 - Extract what you can, flag uncertain values
 - Ask user to verify extracted handwritten amounts
+
+### "The Read tool requires dependencies"
+**This is false.** The Read tool is a built-in capability of Claude Code. It does not require any system packages. If you believe otherwise, re-read this skill file.
 
 ## When to Use This vs Python PDF Libraries
 

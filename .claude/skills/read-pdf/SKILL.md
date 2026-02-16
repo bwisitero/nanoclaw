@@ -2,17 +2,20 @@
 
 This skill enables reading and extracting data from PDF files, including scanned documents.
 
-## CRITICAL: You Already Have PDF Reading Capability
+## Important: PDF Reading Capability
 
-**The Read tool has native PDF support built into Claude Code.** You do NOT need:
-- ❌ poppler-utils
-- ❌ tesseract
-- ❌ pdfplumber
-- ❌ pdftk
-- ❌ ImageMagick
-- ❌ Any other external dependencies
+**The Read tool can read PDFs using poppler-utils (now installed in the container).**
 
-**If you think you need these tools, you are mistaken.** The Read tool works directly on PDFs and images without any external packages. This is a built-in capability of Claude Code.
+What's available:
+- ✅ **poppler-utils** - Installed for PDF rendering
+- ✅ **Read tool** - Works on PDFs (via poppler) and images (via vision)
+- ❌ tesseract - Not needed (Read tool handles OCR via vision)
+- ❌ pdfplumber/Camelot - Not needed for basic extraction
+
+The Read tool works on:
+- **PDFs** - Converted to images internally using poppler, then vision reads them
+- **Images** - Direct vision capability (JPG, PNG, etc.)
+- **Scanned documents** - Treated as images, OCR via vision
 
 ## How to Read PDFs
 

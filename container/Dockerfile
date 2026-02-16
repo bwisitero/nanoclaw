@@ -3,7 +3,7 @@
 
 FROM node:22-slim
 
-# Install system dependencies for Chromium and Python
+# Install system dependencies for Chromium, Python, and PDF reading
 RUN apt-get update && apt-get install -y \
     chromium \
     fonts-liberation \
@@ -25,6 +25,7 @@ RUN apt-get update && apt-get install -y \
     git \
     python3 \
     python3-pip \
+    poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv (modern Python package manager for uvx) and make globally accessible

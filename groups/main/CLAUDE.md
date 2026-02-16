@@ -655,22 +655,37 @@ The task will run in that group's context with access to their files and memory.
 
 ## PDF and Document Processing
 
-**You can read PDFs natively using the Read tool** — up to 100 pages, 32MB max per read.
+**You can read PDFs using the Read tool (poppler-utils is installed).**
 
-### How to Read PDFs
+The Read tool works on:
+- **PDFs** - Uses poppler-utils to render, then vision reads them
+- **Images** - Direct vision capability (JPG, PNG, etc.)
+- **Scanned documents** - OCR via vision capability
+
+### How to Read PDFs (Works Now)
 
 ```bash
-# Read any PDF (native or scanned)
+# Read any PDF - native or scanned, doesn't matter
 Read /workspace/group/uploads/document.pdf
 
 # Read specific pages for large PDFs
 Read /workspace/group/uploads/large.pdf pages=1-50
 
-# Read scanned receipts/images
+# Read scanned receipts/images (vision capability)
 Read /workspace/group/uploads/receipt.jpg
 ```
 
-**You have vision capability** - scanned PDFs and images work the same way as native PDFs.
+**The Read tool is built into Claude Code.** It works on:
+- Native PDFs with extractable text
+- Scanned PDFs (uses vision, no OCR tools needed)
+- Images (JPG, PNG, etc.)
+- Mixed content (text + images)
+
+**If Read tool errors occur:**
+- File may be too large (>32MB) - check with `du -h file.pdf`
+- File may be encrypted - file will indicate this on Read
+- File may not exist - check with `ls -lh file.pdf`
+- Try reading specific pages: `Read file.pdf pages=1-10`
 
 ### Common PDF Tasks
 

@@ -10,6 +10,7 @@ import { z } from 'zod';
 import fs from 'fs';
 import path from 'path';
 import { CronExpressionParser } from 'cron-parser';
+import Database from 'better-sqlite3';
 
 const IPC_DIR = '/workspace/ipc';
 const MESSAGES_DIR = path.join(IPC_DIR, 'messages');
@@ -590,6 +591,263 @@ server.tool(
         type: 'text' as const,
         text: `✅ Skill request sent to admin\n\n*Requested:* ${args.name}\n\nThe admin will review your request and create the skill if approved.`
       }]
+    };
+  },
+);
+
+// --- Document & Conversation Search Tools ---
+
+const DB_PATH = '/workspace/project/store/messages.db';
+
+/** Escape user input for FTS5 MATCH queries (wraps each token in double-quotes). */
+function fts5Escape(query: string): string {
+  return query
+    .replace(/"/g, '""')
+    .split(/\s+/)
+    .filter((w: string) => w.length > 0)
+    .map((w: string) => `"${w}"`)
+    .join(' ');
+}
+
+function openSearchDb(): Database.Database | null {
+  try {
+    if (!fs.existsSync(DB_PATH)) return null;
+    return new Database(DB_PATH, { readonly: true });
+  } catch {
+    return null;
+  }
+}
+
+server.tool(
+  'search_documents',
+  `Search uploaded documents (PDFs, CSVs, images) for specific information using keyword matching.
+Use this to find specific facts, numbers, or terms in tax returns, bank statements, W2s, invoices, etc.
+Results include file name, page number, and a text snippet with matches highlighted between >>> and <<<.
+For conceptual/meaning-based search, use semantic_search instead.`,
+  {
+    query: z.string().describe('Search keywords (e.g., "W2 wages 2023", "total tax", "refund amount")'),
+    limit: z.number().default(10).describe('Maximum results to return'),
+  },
+  async (args) => {
+    const db = openSearchDb();
+    if (!db) {
+      return {
+        content: [{ type: 'text' as const, text: 'Document search is not available (database not found).' }],
+        isError: true,
+      };
+    }
+
+    try {
+      const escaped = fts5Escape(args.query);
+      if (!escaped) {
+        return { content: [{ type: 'text' as const, text: 'Please provide search keywords.' }] };
+      }
+
+      const results = db.prepare(`
+        SELECT
+          dc.file_name,
+          dc.page_number,
+          dc.total_pages,
+          snippet(document_chunks_fts, 0, '>>>', '<<<', '...', 50) as snippet,
+          rank
+        FROM document_chunks_fts
+        JOIN document_chunks dc ON dc.id = document_chunks_fts.rowid
+        WHERE document_chunks_fts MATCH ?
+          AND dc.group_folder = ?
+        ORDER BY rank
+        LIMIT ?
+      `).all(escaped, groupFolder, args.limit) as Array<{
+        file_name: string;
+        page_number: number | null;
+        total_pages: number | null;
+        snippet: string;
+        rank: number;
+      }>;
+
+      if (results.length === 0) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: `No documents found matching "${args.query}". Try different keywords or use semantic_search for meaning-based search.`
+          }],
+        };
+      }
+
+      const formatted = results.map((r, i) => {
+        const page = r.page_number ? ` (page ${r.page_number}${r.total_pages ? `/${r.total_pages}` : ''})` : '';
+        return `**${i + 1}. ${r.file_name}**${page}\n${r.snippet}`;
+      }).join('\n\n');
+
+      return {
+        content: [{
+          type: 'text' as const,
+          text: `Found ${results.length} result(s) for "${args.query}":\n\n${formatted}`
+        }],
+      };
+    } finally {
+      db.close();
+    }
+  },
+);
+
+server.tool(
+  'search_conversations',
+  `Search past conversation messages for specific information using keyword matching.
+Use this to find what was discussed about a topic, decisions made, or information shared in chat.
+Results include sender name and a text snippet with matches highlighted between >>> and <<<.`,
+  {
+    query: z.string().describe('Search keywords (e.g., "RSU withholding", "tax filing deadline")'),
+    limit: z.number().default(10).describe('Maximum results to return'),
+  },
+  async (args) => {
+    const db = openSearchDb();
+    if (!db) {
+      return {
+        content: [{ type: 'text' as const, text: 'Conversation search is not available (database not found).' }],
+        isError: true,
+      };
+    }
+
+    try {
+      const escaped = fts5Escape(args.query);
+      if (!escaped) {
+        return { content: [{ type: 'text' as const, text: 'Please provide search keywords.' }] };
+      }
+
+      const results = db.prepare(`
+        SELECT
+          m.sender_name,
+          m.chat_jid,
+          m.timestamp,
+          snippet(messages_fts, 0, '>>>', '<<<', '...', 50) as snippet,
+          rank
+        FROM messages_fts
+        JOIN messages m ON m.rowid = messages_fts.rowid
+        WHERE messages_fts MATCH ?
+          AND m.chat_jid = ?
+        ORDER BY rank
+        LIMIT ?
+      `).all(escaped, chatJid, args.limit) as Array<{
+        sender_name: string;
+        chat_jid: string;
+        timestamp: string;
+        snippet: string;
+        rank: number;
+      }>;
+
+      if (results.length === 0) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: `No conversations found matching "${args.query}". Try different keywords.`
+          }],
+        };
+      }
+
+      const formatted = results.map((r, i) => {
+        const time = new Date(r.timestamp).toLocaleDateString();
+        return `**${i + 1}. ${r.sender_name}** (${time})\n${r.snippet}`;
+      }).join('\n\n');
+
+      return {
+        content: [{
+          type: 'text' as const,
+          text: `Found ${results.length} conversation(s) matching "${args.query}":\n\n${formatted}`
+        }],
+      };
+    } finally {
+      db.close();
+    }
+  },
+);
+
+server.tool(
+  'semantic_search',
+  `Search documents by meaning/concept rather than exact keywords.
+Use this when keyword search doesn't find what you need, or when the query uses different words than the document.
+Example: searching "how much did I earn" can find "Wages: $85,000" even though the words differ.
+This is slower than search_documents (~2-5 seconds) but finds conceptually related content.`,
+  {
+    query: z.string().describe('Natural language query (e.g., "rental property expenses", "total earnings")'),
+    limit: z.number().default(5).describe('Maximum results to return'),
+  },
+  async (args) => {
+    const RESULTS_DIR = path.join(IPC_DIR, 'results');
+
+    const searchId = `search-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+    // Write search request as IPC task
+    const data = {
+      type: 'semantic_search',
+      query: args.query,
+      groupFolder,
+      limit: args.limit,
+      searchId,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(TASKS_DIR, data);
+
+    // Poll for result
+    const resultPath = path.join(RESULTS_DIR, `${searchId}.json`);
+    const maxWait = 15000; // 15 seconds
+    const pollInterval = 500;
+    const startTime = Date.now();
+
+    while (Date.now() - startTime < maxWait) {
+      if (fs.existsSync(resultPath)) {
+        try {
+          const result = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
+          // Clean up result file
+          try { fs.unlinkSync(resultPath); } catch { /* ignore */ }
+
+          if (result.error) {
+            return {
+              content: [{ type: 'text' as const, text: `Semantic search error: ${result.error}` }],
+              isError: true,
+            };
+          }
+
+          if (!result.results || result.results.length === 0) {
+            return {
+              content: [{
+                type: 'text' as const,
+                text: `No semantically similar content found for "${args.query}". Try search_documents for keyword matching.`
+              }],
+            };
+          }
+
+          const formatted = result.results.map((r: { file_name: string; page_number: number | null; content: string; score: number }, i: number) => {
+            const page = r.page_number ? ` (page ${r.page_number})` : '';
+            const score = `[similarity: ${r.score}]`;
+            // Truncate content to ~200 chars for display
+            const preview = r.content.length > 200 ? r.content.slice(0, 200) + '...' : r.content;
+            return `**${i + 1}. ${r.file_name}**${page} ${score}\n${preview}`;
+          }).join('\n\n');
+
+          return {
+            content: [{
+              type: 'text' as const,
+              text: `Found ${result.results.length} semantically similar result(s):\n\n${formatted}`
+            }],
+          };
+        } catch (err) {
+          return {
+            content: [{ type: 'text' as const, text: `Failed to read search results: ${err}` }],
+            isError: true,
+          };
+        }
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, pollInterval));
+    }
+
+    return {
+      content: [{
+        type: 'text' as const,
+        text: 'Semantic search timed out. The embedding service may not be running. Keyword search (search_documents) is still available.'
+      }],
+      isError: true,
     };
   },
 );

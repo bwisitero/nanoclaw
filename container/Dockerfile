@@ -26,6 +26,7 @@ RUN apt-get update && apt-get install -y \
     python3 \
     python3-pip \
     poppler-utils \
+    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv (modern Python package manager for uvx) and make globally accessible

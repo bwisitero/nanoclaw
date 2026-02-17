@@ -11,7 +11,8 @@ import {
   TIMEZONE,
 } from './config.js';
 import { AvailableGroup } from './container-runner.js';
-import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
+import { createTask, deleteTask, getTaskById, updateTask, getEmbeddingsForSearch } from './db.js';
+import { embedQuery, unpackEmbedding, cosineSimilarity } from './embedding-client.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
 
@@ -240,6 +241,10 @@ export async function processTaskIpc(
     trigger?: string;
     requiresTrigger?: boolean;
     containerConfig?: RegisteredGroup['containerConfig'];
+    // For semantic_search
+    query?: string;
+    searchId?: string;
+    limit?: number;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -441,6 +446,76 @@ export async function processTaskIpc(
           { data },
           'Invalid register_group request - missing required fields',
         );
+      }
+      break;
+
+    case 'semantic_search':
+      if (data.query && data.searchId) {
+        const searchGroupFolder = data.groupFolder || sourceGroup;
+
+        // Authorization: non-main groups can only search their own documents
+        if (!isMain && searchGroupFolder !== sourceGroup) {
+          const resultsDir = path.join(DATA_DIR, 'ipc', sourceGroup, 'results');
+          fs.mkdirSync(resultsDir, { recursive: true });
+          const resultPath = path.join(resultsDir, `${data.searchId}.json`);
+          const tmpPath = `${resultPath}.tmp`;
+          fs.writeFileSync(tmpPath, JSON.stringify({ error: 'Unauthorized: cannot search other groups' }));
+          fs.renameSync(tmpPath, resultPath);
+          logger.warn({ sourceGroup, searchGroupFolder }, 'Unauthorized semantic_search attempt blocked');
+          break;
+        }
+        const searchLimit = data.limit || 10;
+
+        try {
+          // Embed the query
+          const queryEmbedding = await embedQuery(data.query as string);
+
+          // Load all embeddings for the group
+          const allChunks = getEmbeddingsForSearch(searchGroupFolder);
+
+          // Compute cosine similarity
+          const scored = allChunks.map((chunk) => {
+            const chunkEmbedding = unpackEmbedding(chunk.embedding);
+            const score = cosineSimilarity(queryEmbedding, chunkEmbedding);
+            return { ...chunk, score };
+          });
+
+          // Sort by score descending, take top-K
+          scored.sort((a, b) => b.score - a.score);
+          const topResults = scored.slice(0, searchLimit as number).map((r) => ({
+            file_name: r.file_name,
+            page_number: r.page_number,
+            content: r.content,
+            score: Math.round(r.score * 1000) / 1000,
+          }));
+
+          // Write result file
+          const resultsDir = path.join(DATA_DIR, 'ipc', sourceGroup, 'results');
+          fs.mkdirSync(resultsDir, { recursive: true });
+          const resultPath = path.join(resultsDir, `${data.searchId}.json`);
+          const tmpPath = `${resultPath}.tmp`;
+          fs.writeFileSync(tmpPath, JSON.stringify({ results: topResults }));
+          fs.renameSync(tmpPath, resultPath);
+
+          logger.info(
+            { searchId: data.searchId, sourceGroup, results: topResults.length },
+            'Semantic search completed',
+          );
+        } catch (err) {
+          // Write error result so agent doesn't hang (atomic write)
+          const resultsDir = path.join(DATA_DIR, 'ipc', sourceGroup, 'results');
+          fs.mkdirSync(resultsDir, { recursive: true });
+          const resultPath = path.join(resultsDir, `${data.searchId}.json`);
+          const errTmpPath = `${resultPath}.tmp`;
+          fs.writeFileSync(
+            errTmpPath,
+            JSON.stringify({
+              error: err instanceof Error ? err.message : String(err),
+            }),
+          );
+          fs.renameSync(errTmpPath, resultPath);
+          logger.error({ err, searchId: data.searchId }, 'Semantic search failed');
+        }
       }
       break;
 

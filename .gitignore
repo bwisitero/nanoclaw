@@ -31,3 +31,6 @@ groups/global/*
 
 agents-sdk-docs
 .transcription.config.json
+
+# Python virtual environment
+services/venv/

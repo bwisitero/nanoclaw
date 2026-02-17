@@ -7,6 +7,20 @@ import { NewMessage, RegisteredGroup, ScheduledTask, TaskRunLog } from './types.
 
 let db: Database.Database;
 
+/**
+ * Escape user input for FTS5 MATCH queries.
+ * FTS5 has its own query syntax — unquoted special chars (", *, ^, parentheses, AND/OR/NOT)
+ * cause runtime errors. Wrapping each token in double-quotes makes them literal.
+ */
+export function fts5Escape(query: string): string {
+  return query
+    .replace(/"/g, '""')
+    .split(/\s+/)
+    .filter((w) => w.length > 0)
+    .map((w) => `"${w}"`)
+    .join(' ');
+}
+
 function createSchema(database: Database.Database): void {
   database.exec(`
     CREATE TABLE IF NOT EXISTS chats (
@@ -88,6 +102,43 @@ function createSchema(database: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_costs_timestamp ON costs(timestamp);
     CREATE INDEX IF NOT EXISTS idx_costs_chat ON costs(chat_jid);
     CREATE INDEX IF NOT EXISTS idx_costs_session ON costs(session_id);
+
+    -- Document search: extracted content chunks
+    CREATE TABLE IF NOT EXISTS document_chunks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      file_path TEXT NOT NULL,
+      file_name TEXT NOT NULL,
+      group_folder TEXT NOT NULL,
+      chunk_index INTEGER NOT NULL,
+      content TEXT NOT NULL,
+      content_hash TEXT NOT NULL,
+      page_number INTEGER,
+      total_pages INTEGER,
+      tokens_count INTEGER,
+      embedding BLOB,
+      indexed_at TEXT NOT NULL,
+      UNIQUE(file_path, chunk_index)
+    );
+    CREATE INDEX IF NOT EXISTS idx_doc_chunks_file ON document_chunks(file_path);
+    CREATE INDEX IF NOT EXISTS idx_doc_chunks_folder ON document_chunks(group_folder);
+    CREATE INDEX IF NOT EXISTS idx_doc_chunks_hash ON document_chunks(content_hash);
+
+    -- FTS5 for document content keyword search
+    CREATE VIRTUAL TABLE IF NOT EXISTS document_chunks_fts USING fts5(
+      content,
+      file_name,
+      content=document_chunks,
+      content_rowid=id
+    );
+
+    -- FTS5 for conversation messages keyword search
+    CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+      content,
+      sender_name,
+      chat_jid UNINDEXED,
+      content=messages,
+      content_rowid=rowid
+    );
   `);
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
@@ -98,6 +149,65 @@ function createSchema(database: Database.Database): void {
   } catch {
     /* column already exists */
   }
+
+  // FTS5 sync triggers (no IF NOT EXISTS for triggers, use DROP + CREATE)
+  database.exec(`
+    DROP TRIGGER IF EXISTS doc_chunks_ai;
+    CREATE TRIGGER doc_chunks_ai AFTER INSERT ON document_chunks BEGIN
+      INSERT INTO document_chunks_fts(rowid, content, file_name)
+      VALUES (new.id, new.content, new.file_name);
+    END;
+
+    DROP TRIGGER IF EXISTS doc_chunks_ad;
+    CREATE TRIGGER doc_chunks_ad AFTER DELETE ON document_chunks BEGIN
+      INSERT INTO document_chunks_fts(document_chunks_fts, rowid, content, file_name)
+      VALUES('delete', old.id, old.content, old.file_name);
+    END;
+
+    DROP TRIGGER IF EXISTS doc_chunks_au;
+    CREATE TRIGGER doc_chunks_au AFTER UPDATE ON document_chunks BEGIN
+      INSERT INTO document_chunks_fts(document_chunks_fts, rowid, content, file_name)
+      VALUES('delete', old.id, old.content, old.file_name);
+      INSERT INTO document_chunks_fts(rowid, content, file_name)
+      VALUES (new.id, new.content, new.file_name);
+    END;
+
+    DROP TRIGGER IF EXISTS messages_fts_ai;
+    CREATE TRIGGER messages_fts_ai AFTER INSERT ON messages BEGIN
+      INSERT INTO messages_fts(rowid, content, sender_name, chat_jid)
+      VALUES (new.rowid, new.content, new.sender_name, new.chat_jid);
+    END;
+
+    DROP TRIGGER IF EXISTS messages_fts_ad;
+    CREATE TRIGGER messages_fts_ad AFTER DELETE ON messages BEGIN
+      INSERT INTO messages_fts(messages_fts, rowid, content, sender_name, chat_jid)
+      VALUES('delete', old.rowid, old.content, old.sender_name, old.chat_jid);
+    END;
+
+    DROP TRIGGER IF EXISTS messages_fts_au;
+    CREATE TRIGGER messages_fts_au AFTER UPDATE ON messages BEGIN
+      INSERT INTO messages_fts(messages_fts, rowid, content, sender_name, chat_jid)
+      VALUES('delete', old.rowid, old.content, old.sender_name, old.chat_jid);
+      INSERT INTO messages_fts(rowid, content, sender_name, chat_jid)
+      VALUES (new.rowid, new.content, new.sender_name, new.chat_jid);
+    END;
+  `);
+
+  // Backfill messages_fts from existing messages (one-time migration, transactional)
+  const migrated = database
+    .prepare("SELECT value FROM router_state WHERE key = 'messages_fts_backfilled'")
+    .get() as { value: string } | undefined;
+  if (!migrated) {
+    database.transaction(() => {
+      database.exec(`
+        INSERT INTO messages_fts(rowid, content, sender_name, chat_jid)
+        SELECT rowid, content, sender_name, chat_jid FROM messages;
+      `);
+      database.prepare(
+        "INSERT OR REPLACE INTO router_state (key, value) VALUES ('messages_fts_backfilled', '1')",
+      ).run();
+    })();
+  }
 }
 
 export function initDatabase(): void {
@@ -105,6 +215,7 @@ export function initDatabase(): void {
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 
   db = new Database(dbPath);
+  db.pragma('journal_mode = WAL');
   createSchema(db);
 
   // Migrate from JSON files if they exist
@@ -657,6 +768,213 @@ export function getCostsByTimeRange(hours: number): {
     total_cost: number;
     total_interactions: number;
     avg_cost_per_interaction: number;
+  };
+  return result;
+}
+
+// --- Document search ---
+
+export interface DocumentChunk {
+  file_path: string;
+  file_name: string;
+  group_folder: string;
+  chunk_index: number;
+  content: string;
+  content_hash: string;
+  page_number: number | null;
+  total_pages: number | null;
+  tokens_count: number | null;
+  embedding: Buffer | null;
+  indexed_at: string;
+}
+
+export interface SearchResult {
+  file_name: string;
+  page_number: number | null;
+  total_pages: number | null;
+  snippet: string;
+  rank: number;
+}
+
+export interface ConversationSearchResult {
+  sender_name: string;
+  chat_jid: string;
+  snippet: string;
+  rank: number;
+}
+
+export function storeDocumentChunk(chunk: Omit<DocumentChunk, 'embedding'>): void {
+  db.prepare(`
+    INSERT OR REPLACE INTO document_chunks
+      (file_path, file_name, group_folder, chunk_index, content, content_hash, page_number, total_pages, tokens_count, indexed_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    chunk.file_path,
+    chunk.file_name,
+    chunk.group_folder,
+    chunk.chunk_index,
+    chunk.content,
+    chunk.content_hash,
+    chunk.page_number,
+    chunk.total_pages,
+    chunk.tokens_count,
+    chunk.indexed_at,
+  );
+}
+
+export function storeDocumentChunks(chunks: Omit<DocumentChunk, 'embedding'>[]): void {
+  const insert = db.prepare(`
+    INSERT OR REPLACE INTO document_chunks
+      (file_path, file_name, group_folder, chunk_index, content, content_hash, page_number, total_pages, tokens_count, indexed_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  const transaction = db.transaction((items: Omit<DocumentChunk, 'embedding'>[]) => {
+    for (const chunk of items) {
+      insert.run(
+        chunk.file_path,
+        chunk.file_name,
+        chunk.group_folder,
+        chunk.chunk_index,
+        chunk.content,
+        chunk.content_hash,
+        chunk.page_number,
+        chunk.total_pages,
+        chunk.tokens_count,
+        chunk.indexed_at,
+      );
+    }
+  });
+  transaction(chunks);
+}
+
+export function searchDocuments(
+  query: string,
+  groupFolder: string,
+  limit: number = 10,
+): SearchResult[] {
+  const escaped = fts5Escape(query);
+  if (!escaped) return [];
+  return db
+    .prepare(`
+      SELECT
+        dc.file_name,
+        dc.page_number,
+        dc.total_pages,
+        snippet(document_chunks_fts, 0, '>>>', '<<<', '...', 50) as snippet,
+        rank
+      FROM document_chunks_fts
+      JOIN document_chunks dc ON dc.id = document_chunks_fts.rowid
+      WHERE document_chunks_fts MATCH ?
+        AND dc.group_folder = ?
+      ORDER BY rank
+      LIMIT ?
+    `)
+    .all(escaped, groupFolder, limit) as SearchResult[];
+}
+
+export function searchConversations(
+  query: string,
+  chatJid: string,
+  limit: number = 10,
+): ConversationSearchResult[] {
+  const escaped = fts5Escape(query);
+  if (!escaped) return [];
+  return db
+    .prepare(`
+      SELECT
+        m.sender_name,
+        m.chat_jid,
+        snippet(messages_fts, 0, '>>>', '<<<', '...', 50) as snippet,
+        rank
+      FROM messages_fts
+      JOIN messages m ON m.rowid = messages_fts.rowid
+      WHERE messages_fts MATCH ?
+        AND m.chat_jid = ?
+      ORDER BY rank
+      LIMIT ?
+    `)
+    .all(escaped, chatJid, limit) as ConversationSearchResult[];
+}
+
+export function getIndexedFiles(groupFolder: string): string[] {
+  const rows = db
+    .prepare('SELECT DISTINCT file_path FROM document_chunks WHERE group_folder = ?')
+    .all(groupFolder) as Array<{ file_path: string }>;
+  return rows.map((r) => r.file_path);
+}
+
+export function getFileContentHash(filePath: string): string | undefined {
+  const row = db
+    .prepare('SELECT content_hash FROM document_chunks WHERE file_path = ? LIMIT 1')
+    .get(filePath) as { content_hash: string } | undefined;
+  return row?.content_hash;
+}
+
+export function deleteDocumentChunks(filePath: string): void {
+  db.prepare('DELETE FROM document_chunks WHERE file_path = ?').run(filePath);
+}
+
+export function storeDocumentEmbeddings(
+  updates: Array<{ id: number; embedding: Buffer }>,
+): void {
+  const stmt = db.prepare('UPDATE document_chunks SET embedding = ? WHERE id = ?');
+  const transaction = db.transaction((items: Array<{ id: number; embedding: Buffer }>) => {
+    for (const item of items) {
+      stmt.run(item.embedding, item.id);
+    }
+  });
+  transaction(updates);
+}
+
+export function getChunksWithoutEmbeddings(
+  groupFolder: string,
+  limit: number = 100,
+): Array<{ id: number; content: string }> {
+  return db
+    .prepare(`
+      SELECT id, content FROM document_chunks
+      WHERE group_folder = ? AND embedding IS NULL
+      LIMIT ?
+    `)
+    .all(groupFolder, limit) as Array<{ id: number; content: string }>;
+}
+
+export function getEmbeddingsForSearch(
+  groupFolder: string,
+): Array<{ id: number; file_name: string; content: string; page_number: number | null; embedding: Buffer }> {
+  return db
+    .prepare(`
+      SELECT id, file_name, content, page_number, embedding
+      FROM document_chunks
+      WHERE group_folder = ? AND embedding IS NOT NULL
+    `)
+    .all(groupFolder) as Array<{
+    id: number;
+    file_name: string;
+    content: string;
+    page_number: number | null;
+    embedding: Buffer;
+  }>;
+}
+
+export function getDocumentStats(groupFolder: string): {
+  total_files: number;
+  total_chunks: number;
+  embedded_chunks: number;
+} {
+  const result = db
+    .prepare(`
+      SELECT
+        COUNT(DISTINCT file_path) as total_files,
+        COUNT(*) as total_chunks,
+        COUNT(embedding) as embedded_chunks
+      FROM document_chunks
+      WHERE group_folder = ?
+    `)
+    .get(groupFolder) as {
+    total_files: number;
+    total_chunks: number;
+    embedded_chunks: number;
   };
   return result;
 }

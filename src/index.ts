@@ -21,6 +21,8 @@ import {
   writeGroupsSnapshot,
   writeTasksSnapshot,
 } from './container-runner.js';
+import { indexAllDocuments, watchUploads } from './document-processor.js';
+import { stopEmbeddingService } from './embedding-client.js';
 import {
   getAllChats,
   getAllRegisteredGroups,
@@ -51,6 +53,7 @@ let sessions: Record<string, string> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
+const uploadWatchers: Array<() => void> = [];
 
 let whatsapp: WhatsAppChannel;
 const channels: Channel[] = [];
@@ -597,6 +600,8 @@ async function main(): Promise<void> {
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received');
+    for (const cleanup of uploadWatchers) cleanup();
+    stopEmbeddingService();
     await queue.shutdown(10000);
     for (const ch of channels) await ch.disconnect();
     process.exit(0);
@@ -663,6 +668,18 @@ async function main(): Promise<void> {
   });
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();
+
+  // Index documents in background (non-blocking)
+  for (const [, group] of Object.entries(registeredGroups)) {
+    indexAllDocuments(group.folder).catch((err) => {
+      logger.warn({ err, group: group.folder }, 'Background document indexing failed');
+    });
+    const cleanup = watchUploads(group.folder, (filePath) => {
+      logger.info({ filePath, group: group.folder }, 'New upload indexed');
+    });
+    uploadWatchers.push(cleanup);
+  }
+
   startMessageLoop();
 }
 

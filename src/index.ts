@@ -734,9 +734,13 @@ async function main(): Promise<void> {
   logger.info('Database initialized');
   loadState();
 
+  // Health check interval reference (set later, cleaned up on shutdown)
+  let healthInterval: ReturnType<typeof setInterval> | null = null;
+
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received');
+    if (healthInterval) clearInterval(healthInterval);
     stopIpcWatcher();
     for (const cleanup of uploadWatchers) cleanup();
     stopEmbeddingService();
@@ -822,6 +826,84 @@ async function main(): Promise<void> {
     });
     uploadWatchers.push(cleanup);
   }
+
+  // Lightweight health check — runs in the host process (not a container)
+  // every 5 minutes. Verifies channels, DB, and container health. Alerts
+  // the main group via the first connected channel if something is wrong.
+  const HEALTH_CHECK_INTERVAL = 5 * 60 * 1000; // 5 minutes
+  let lastHealthAlert = 0;
+  const HEALTH_ALERT_COOLDOWN = 30 * 60 * 1000; // Don't spam: max 1 alert per 30 min
+
+  const healthCheck = () => {
+    const issues: string[] = [];
+
+    // 1. Check channel connectivity
+    for (const ch of channels) {
+      if (!ch.isConnected()) {
+        issues.push(`${ch.name} disconnected`);
+      }
+    }
+
+    // 2. Check SQLite is responsive
+    try {
+      getRouterState('last_timestamp');
+    } catch (err) {
+      issues.push(`SQLite error: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    // 3. Check for stuck containers (running > max runtime * 1.5)
+    // Uses execSync from the top-level import — no dynamic require needed.
+    const maxRuntime = parseInt(process.env.CONTAINER_MAX_RUNTIME || '7200000', 10);
+    const stuckThresholdHours = (maxRuntime * 1.5) / (3600 * 1000); // e.g. 3h for 2h default
+    try {
+      let running: string[] = [];
+      try {
+        const output = execSync(
+          'docker ps --filter "name=nanoclaw-" --format "{{.Names}} {{.RunningFor}}"',
+          { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 5000 },
+        );
+        running = output.trim().split('\n').filter(Boolean);
+      } catch {
+        // Docker not available or not running — skip stuck container check
+      }
+      for (const line of running) {
+        if (line.includes('hours') || line.includes('hour')) {
+          const hours = parseInt(line.match(/(\d+)\s*hour/)?.[1] || '0', 10);
+          if (hours >= stuckThresholdHours) {
+            issues.push(`Container may be stuck: ${line.split(' ')[0]} (${hours}h)`);
+          }
+        }
+      }
+    } catch {
+      // Container check failed — non-fatal, skip
+    }
+
+    if (issues.length > 0 && Date.now() - lastHealthAlert > HEALTH_ALERT_COOLDOWN) {
+      lastHealthAlert = Date.now();
+      const alertText = `⚠️ *Health Check Alert*\n\n${issues.map(i => `• ${i}`).join('\n')}`;
+      logger.warn({ issues }, 'Health check found issues');
+
+      // Find main group JID and send alert
+      const mainEntry = Object.entries(registeredGroups).find(
+        ([_, g]) => g.folder === MAIN_GROUP_FOLDER,
+      );
+      if (mainEntry) {
+        const [mainJid] = mainEntry;
+        const ch = findChannel(channels, mainJid);
+        if (ch) {
+          ch.sendMessage(mainJid, alertText).catch((err) => {
+            logger.error({ err }, 'Failed to send health alert');
+          });
+        }
+      }
+    } else if (issues.length > 0) {
+      logger.debug({ issues }, 'Health check issues (alert on cooldown)');
+    }
+  };
+
+  healthInterval = setInterval(healthCheck, HEALTH_CHECK_INTERVAL);
+  // Run first check after 60s (let channels stabilize)
+  setTimeout(healthCheck, 60000);
 
   startMessageLoop();
 }

@@ -51,6 +51,12 @@ export interface NewMessage {
   is_from_me?: boolean;
 }
 
+export interface QuietHours {
+  start: string; // "HH:MM" in task's timezone (e.g. "22:00")
+  end: string;   // "HH:MM" (e.g. "07:00") — can wrap past midnight
+  days?: number[]; // 0=Sunday..6=Saturday. Omit or empty = all days.
+}
+
 export interface ScheduledTask {
   id: string;
   group_folder: string;
@@ -59,6 +65,7 @@ export interface ScheduledTask {
   schedule_type: 'cron' | 'interval' | 'once';
   schedule_value: string;
   context_mode: 'group' | 'isolated';
+  quiet_hours?: string | null; // JSON-encoded QuietHours, or null
   next_run: string | null;
   last_run: string | null;
   last_result: string | null;

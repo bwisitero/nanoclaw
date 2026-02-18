@@ -297,6 +297,7 @@ export async function processTaskIpc(
     schedule_type?: string;
     schedule_value?: string;
     context_mode?: string;
+    quiet_hours?: { start: string; end: string; days?: number[] };
     groupFolder?: string;
     chatJid?: string;
     targetJid?: string;
@@ -392,6 +393,21 @@ export async function processTaskIpc(
           data.context_mode === 'group' || data.context_mode === 'isolated'
             ? data.context_mode
             : 'isolated';
+        // Validate quiet_hours structure if provided (HH:MM format, valid days)
+        let quietHours: string | null = null;
+        if (data.quiet_hours) {
+          const qh = data.quiet_hours;
+          const timePattern = /^\d{1,2}:\d{2}$/;
+          if (typeof qh.start === 'string' && timePattern.test(qh.start)
+            && typeof qh.end === 'string' && timePattern.test(qh.end)
+            && (!qh.days || (Array.isArray(qh.days) && qh.days.every((d: unknown) => typeof d === 'number' && d >= 0 && d <= 6)))
+          ) {
+            // Only store validated fields — strip any extra properties
+            quietHours = JSON.stringify({ start: qh.start, end: qh.end, ...(qh.days ? { days: qh.days } : {}) });
+          } else {
+            logger.warn({ quietHours: qh }, 'Invalid quiet_hours format, ignoring');
+          }
+        }
         createTask({
           id: taskId,
           group_folder: targetFolder,
@@ -400,6 +416,7 @@ export async function processTaskIpc(
           schedule_type: scheduleType,
           schedule_value: data.schedule_value,
           context_mode: contextMode,
+          quiet_hours: quietHours,
           next_run: nextRun,
           status: 'active',
           created_at: new Date().toISOString(),

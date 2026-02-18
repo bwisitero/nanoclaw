@@ -57,6 +57,10 @@ launchctl load ~/Library/LaunchAgents/com.nanoclaw.plist
 launchctl unload ~/Library/LaunchAgents/com.nanoclaw.plist
 ```
 
+## Auto-Restart on Build
+
+The launchd plist has `WatchPaths` on `dist/index.js`. When the main agent (or Claude Code) runs `npm run build`, launchd detects the change and restarts the service automatically. This enables the main channel agent to self-heal — edit source, build, and the fix goes live without manual intervention.
+
 ## Container Build Cache
 
 Apple Container's buildkit caches the build context aggressively. `--no-cache` alone does NOT invalidate COPY steps — the builder's volume retains stale files. To force a truly clean rebuild:

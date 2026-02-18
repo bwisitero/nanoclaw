@@ -430,6 +430,31 @@ You can read and write to `/workspace/project/groups/global/CLAUDE.md` for facts
 
 ---
 
+## Self-Maintenance
+
+You can fix bugs, update MCP configs, add skills, and modify your own source code. Changes to host code require a build to take effect — launchd will auto-restart when `dist/` changes.
+
+**Workflow for code changes:**
+1. Edit source files under `/workspace/project/src/`
+2. Run `npm run build` in `/workspace/project/`
+3. The service auto-restarts (launchd watches `dist/index.js`)
+4. Your current container will be killed — this is expected
+
+**Settings changes (no build needed):**
+- Edit `/workspace/project/data/sessions/{group}/.claude/settings.json` for MCP server configs
+- These take effect on the next container spawn for that group
+
+**Skills (no build/restart needed):**
+- Add/edit skills in `/workspace/project/container/skills/`
+- Skills are mounted read-only into all containers, picked up on next spawn
+
+**What you CANNOT do (requires host access):**
+- Rebuild the container image (new system packages, Dockerfile changes)
+- WhatsApp re-authentication (QR code)
+- Install new npm dependencies on the host
+
+---
+
 ## Scheduling for Other Groups
 
 When scheduling tasks for other groups, use the `target_group_jid` parameter with the group's JID from `registered_groups.json`:

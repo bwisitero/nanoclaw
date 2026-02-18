@@ -204,7 +204,7 @@ function buildVolumeMounts(
       mcpServers: {
         tavily: {
           command: 'npx',
-          args: ['-y', '@tavily/mcp-server'],
+          args: ['-y', 'tavily-mcp'],
           env: {
             TAVILY_API_KEY: '${TAVILY_API_KEY}',
           },

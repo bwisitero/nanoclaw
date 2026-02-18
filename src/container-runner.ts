@@ -223,7 +223,17 @@ function buildVolumeMounts(
     }, null, 2) + '\n');
   }
 
-  // AWS credentials flow via readSecrets() through stdin — no mount needed.
+  // Mount AWS credentials directory (if it exists) for Bedrock authentication.
+  // AWS_PROFILE is passed via readSecrets() env vars, but the SDK needs the
+  // actual ~/.aws/config and ~/.aws/credentials files to resolve the profile.
+  const awsDir = path.join(homeDir, '.aws');
+  if (fs.existsSync(awsDir)) {
+    mounts.push({
+      hostPath: awsDir,
+      containerPath: '/home/node/.aws',
+      readonly: true,
+    });
+  }
 
   // Mount .claude sessions directory
   mounts.push({

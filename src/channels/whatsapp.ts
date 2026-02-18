@@ -37,6 +37,7 @@ export class WhatsAppChannel implements Channel {
   private outgoingQueue: Array<{ jid: string; text: string }> = [];
   private flushing = false;
   private groupSyncTimerStarted = false;
+  private groupSyncTimer: ReturnType<typeof setInterval> | null = null;
   private reconnectAttempts = 0;
   private readonly maxReconnectAttempts = 5;
 
@@ -165,7 +166,7 @@ export class WhatsAppChannel implements Channel {
         // Set up daily sync timer (only once)
         if (!this.groupSyncTimerStarted) {
           this.groupSyncTimerStarted = true;
-          setInterval(() => {
+          this.groupSyncTimer = setInterval(() => {
             this.syncGroupMetadata().catch((err) =>
               logger.error({ err }, 'Periodic group sync failed'),
             );
@@ -250,6 +251,11 @@ export class WhatsAppChannel implements Channel {
 
   async disconnect(): Promise<void> {
     this.connected = false;
+    if (this.groupSyncTimer) {
+      clearInterval(this.groupSyncTimer);
+      this.groupSyncTimer = null;
+      this.groupSyncTimerStarted = false;
+    }
     this.sock?.end(undefined);
   }
 

@@ -41,7 +41,7 @@ import {
   storeMessage,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
-import { startIpcWatcher } from './ipc.js';
+import { startIpcWatcher, stopIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
@@ -230,6 +230,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   await channel.setTyping?.(chatJid, true);
   let hadError = false;
   let outputSentToUser = false;
+  let containerDidWork = false;
   // Track the cursor at the time of last successful output so we can roll
   // back follow-up messages that were piped but never got a response.
   let lastConfirmedCursor = lastAgentTimestamp[chatJid] || '';
@@ -259,10 +260,13 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             progressMessageId = id;
           }
         })();
-      }, 2000)
+      }, 750)
     : null;
 
-  const output = await runAgent(group, prompt, chatJid, async (result) => {
+  let output: 'success' | 'error' = 'error';
+  try {
+  output = await runAgent(group, prompt, chatJid, async (result) => {
+    try {
     // Streaming output callback — called for each agent result
     if (result.result) {
       // Cancel progress timer if it hasn't fired yet
@@ -278,6 +282,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
       const raw = typeof result.result === 'string' ? result.result : JSON.stringify(result.result);
       logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
+      containerDidWork = true;
+      // Stop typing indicator refresh once we start sending output
+      clearInterval(typingInterval);
       const formatted = formatOutbound(channel, raw);
       if (formatted) {
         await channel.sendMessage(chatJid, formatted);
@@ -301,6 +308,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     } else if (result.result === null && agentUsedTools) {
       // Agent used tools but returned no text — the user would see silence.
       // Send a fallback so the user knows the turn completed.
+      containerDidWork = true;
       logger.warn({ group: group.name }, 'Agent returned null result after using tools — sending fallback');
       if (progressTimer) clearTimeout(progressTimer);
       await progressReady;
@@ -318,6 +326,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }
 
     if (result.status === 'error') {
+      hadError = true;
+    }
+    } catch (err) {
+      logger.error({ group: group.name, err: String(err) }, 'Error in output callback');
       hadError = true;
     }
   }, (tool: string) => {
@@ -349,17 +361,20 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         logger.warn({ group: group.name, err }, 'Progress update failed');
       });
   });
-
-  // Clean up typing indicator and timers
-  clearInterval(typingInterval);
-  if (progressTimer) clearTimeout(progressTimer);
-  await progressReady;
-  await editChain;
-  if (progressMessageId && channel.deleteMessage) {
-    channel.deleteMessage(chatJid, progressMessageId).catch(() => {});
+  } finally {
+    // Clean up typing indicator and timers
+    clearInterval(typingInterval);
+    if (progressTimer) clearTimeout(progressTimer);
+    if (idleTimer) clearTimeout(idleTimer);
+    const withTimeout = (p: Promise<unknown>, ms: number) =>
+      Promise.race([p, new Promise((_, r) => setTimeout(() => r(new Error('timeout')), ms))]);
+    try { await withTimeout(progressReady, 5000); } catch {}
+    try { await withTimeout(editChain, 5000); } catch {}
+    if (progressMessageId && channel.deleteMessage) {
+      channel.deleteMessage(chatJid, progressMessageId).catch(() => {});
+    }
+    await channel.setTyping?.(chatJid, false);
   }
-  await channel.setTyping?.(chatJid, false);
-  if (idleTimer) clearTimeout(idleTimer);
 
   if (output === 'error' || hadError) {
     if (outputSentToUser) {
@@ -383,6 +398,14 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     saveState();
     logger.warn({ group: group.name }, 'Agent error, rolled back message cursor for retry');
     return false;
+  }
+
+  // Container exited cleanly but produced no output — roll back cursor
+  // so messages will be re-queued on next loop iteration.
+  if (!containerDidWork && !hadError) {
+    lastAgentTimestamp[chatJid] = previousCursor;
+    saveState();
+    logger.warn({ group: group.name }, 'Container exited without output, rolled back cursor');
   }
 
   return true;
@@ -714,6 +737,7 @@ async function main(): Promise<void> {
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received');
+    stopIpcWatcher();
     for (const cleanup of uploadWatchers) cleanup();
     stopEmbeddingService();
     await queue.shutdown(10000);
@@ -768,8 +792,13 @@ async function main(): Promise<void> {
       const channel = findChannel(channels, jid);
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
       if (!channel.sendFile) throw new Error(`Channel ${channel.name} does not support file sending`);
-      // Resolve group-relative path to absolute path
-      const absolutePath = path.join(GROUPS_DIR, groupFolder, filePath);
+      // Resolve group-relative path to absolute path with traversal protection
+      const absolutePath = path.resolve(path.join(GROUPS_DIR, groupFolder, filePath));
+      const groupDir = path.resolve(path.join(GROUPS_DIR, groupFolder));
+      if (!absolutePath.startsWith(groupDir + path.sep) && absolutePath !== groupDir) {
+        logger.warn({ groupFolder, filePath }, 'Path traversal blocked in send_file');
+        throw new Error('File path outside group directory');
+      }
       return channel.sendFile(jid, absolutePath, caption);
     },
     registeredGroups: () => registeredGroups,

@@ -107,6 +107,7 @@ function start(): Promise<void> {
     // Timeout for startup (model download on first run can be slow)
     setTimeout(() => {
       if (!ready) {
+        if (proc && !proc.killed) proc.kill('SIGKILL');
         startPromise = null;
         reject(new Error('Embedding service startup timeout (120s)'));
       }

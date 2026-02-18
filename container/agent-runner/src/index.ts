@@ -373,23 +373,39 @@ function drainIpcInput(): string[] {
 
 /**
  * Wait for a new IPC message or _close sentinel.
+ * Uses fs.watch for low-latency detection with a fallback poll.
  * Returns the messages as a single string, or null if _close.
  */
 function waitForIpcMessage(): Promise<string | null> {
   return new Promise((resolve) => {
-    const poll = () => {
-      if (shouldClose()) {
-        resolve(null);
-        return;
-      }
-      const messages = drainIpcInput();
-      if (messages.length > 0) {
-        resolve(messages.join('\n'));
-        return;
-      }
-      setTimeout(poll, IPC_POLL_MS);
+    // Check immediately first
+    if (shouldClose()) { resolve(null); return; }
+    const immediate = drainIpcInput();
+    if (immediate.length > 0) { resolve(immediate.join('\n')); return; }
+
+    let watcher: fs.FSWatcher | null = null;
+    let fallback: ReturnType<typeof setInterval> | null = null;
+
+    const cleanup = () => {
+      if (watcher) { try { watcher.close(); } catch {} watcher = null; }
+      if (fallback) { clearInterval(fallback); fallback = null; }
     };
-    poll();
+
+    const check = () => {
+      if (shouldClose()) { cleanup(); resolve(null); return; }
+      const messages = drainIpcInput();
+      if (messages.length > 0) { cleanup(); resolve(messages.join('\n')); }
+    };
+
+    // Watch for new files
+    try {
+      watcher = fs.watch(IPC_INPUT_DIR, () => check());
+    } catch {
+      // Fallback to polling if watch fails
+    }
+
+    // Safety fallback: poll every 250ms
+    fallback = setInterval(check, 250);
   });
 }
 

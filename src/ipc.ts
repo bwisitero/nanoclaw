@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
@@ -43,6 +44,8 @@ export function startIpcWatcher(deps: IpcDeps): void {
   const ipcBaseDir = path.join(DATA_DIR, 'ipc');
   fs.mkdirSync(ipcBaseDir, { recursive: true });
 
+  let ipcRetryDelay = IPC_POLL_INTERVAL;
+
   const processIpcFiles = async () => {
     // Scan all group IPC directories (identity determined by directory)
     let groupFolders: string[];
@@ -53,7 +56,8 @@ export function startIpcWatcher(deps: IpcDeps): void {
       });
     } catch (err) {
       logger.error({ err }, 'Error reading IPC base directory');
-      setTimeout(processIpcFiles, IPC_POLL_INTERVAL);
+      ipcRetryDelay = Math.min(ipcRetryDelay * 2, 60000);
+      setTimeout(processIpcFiles, ipcRetryDelay);
       return;
     }
 
@@ -129,6 +133,10 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   const [mainJid, _] = mainGroupEntry;
                   const requestingGroupName = registeredGroups[data.requestingChatJid]?.name || 'Unknown';
 
+                  // Verify requesting JID belongs to the source group
+                  if (!isMain && registeredGroups[data.requestingChatJid]?.folder !== sourceGroup) {
+                    logger.warn({ requestingChatJid: data.requestingChatJid, sourceGroup }, 'Cross-group skill request blocked');
+                  } else {
                   // Format skill request message for admin
                   const message = `*📋 Skill Request*
 
@@ -158,6 +166,7 @@ create_skill(
                     { requestingGroup: sourceGroup, skillName: data.skillName },
                     'Skill request forwarded to admin',
                   );
+                  }
                 } else {
                   logger.warn('No main group found for skill request');
                 }
@@ -216,11 +225,68 @@ create_skill(
       }
     }
 
-    setTimeout(processIpcFiles, IPC_POLL_INTERVAL);
+    ipcRetryDelay = IPC_POLL_INTERVAL; // reset on success
   };
 
-  processIpcFiles();
-  logger.info('IPC watcher started (per-group namespaces)');
+  // Use fs.watch on group IPC directories for low-latency detection,
+  // with a fallback poll every 5s in case fs.watch misses events.
+  const watchers: fs.FSWatcher[] = [];
+  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  let processing = false;
+
+  const scheduleProcessing = () => {
+    if (debounceTimer) clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(async () => {
+      if (processing) return;
+      processing = true;
+      try { await processIpcFiles(); } finally { processing = false; }
+    }, 50);
+  };
+
+  // Set up watchers for existing group directories
+  const setupWatchers = () => {
+    try {
+      const groupFolders = fs.readdirSync(ipcBaseDir).filter((f) => {
+        try { return fs.statSync(path.join(ipcBaseDir, f)).isDirectory() && f !== 'errors'; }
+        catch { return false; }
+      });
+      for (const groupFolder of groupFolders) {
+        for (const subdir of ['messages', 'tasks']) {
+          const dir = path.join(ipcBaseDir, groupFolder, subdir);
+          if (!fs.existsSync(dir)) continue;
+          try {
+            const watcher = fs.watch(dir, () => scheduleProcessing());
+            watchers.push(watcher);
+          } catch { /* ignore watch errors for individual dirs */ }
+        }
+      }
+    } catch { /* ignore — fallback poll will handle it */ }
+  };
+
+  setupWatchers();
+
+  // Fallback poll every 5s in case fs.watch misses events
+  const fallbackInterval = setInterval(scheduleProcessing, 5000);
+
+  // Initial processing
+  scheduleProcessing();
+  logger.info('IPC watcher started (fs.watch + fallback poll)');
+
+  // Store cleanup function for shutdown
+  ipcCleanup = () => {
+    for (const w of watchers) { try { w.close(); } catch {} }
+    watchers.length = 0;
+    clearInterval(fallbackInterval);
+    if (debounceTimer) clearTimeout(debounceTimer);
+  };
+}
+
+let ipcCleanup: (() => void) | null = null;
+
+export function stopIpcWatcher(): void {
+  ipcCleanup?.();
+  ipcCleanup = null;
+  ipcWatcherRunning = false;
 }
 
 export async function processTaskIpc(
@@ -321,7 +387,7 @@ export async function processTaskIpc(
           nextRun = scheduled.toISOString();
         }
 
-        const taskId = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const taskId = `task-${crypto.randomBytes(12).toString('hex')}`;
         const contextMode =
           data.context_mode === 'group' || data.context_mode === 'isolated'
             ? data.context_mode

@@ -1,7 +1,8 @@
+import os from 'os';
 import path from 'path';
 
 export const ASSISTANT_NAME = process.env.ASSISTANT_NAME || 'Andy';
-export const POLL_INTERVAL = 2000;
+export const POLL_INTERVAL = 750;
 export const SCHEDULER_POLL_INTERVAL = 60000;
 
 // Absolute paths needed for container mounts
@@ -37,7 +38,7 @@ export const IDLE_TIMEOUT = parseInt(
 ); // 30min default — how long to keep container alive after last result
 export const MAX_CONCURRENT_CONTAINERS = Math.max(
   1,
-  parseInt(process.env.MAX_CONCURRENT_CONTAINERS || '5', 10) || 5,
+  parseInt(process.env.MAX_CONCURRENT_CONTAINERS || String(Math.min(os.cpus().length, 20)), 10) || 5,
 );
 
 function escapeRegex(str: string): string {

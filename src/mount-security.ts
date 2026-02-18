@@ -351,8 +351,37 @@ export function validateAdditionalMounts(
     const result = validateMount(mount, isMain);
 
     if (result.allowed) {
+      // Scan first level of mounted directory for symlinks escaping the allowed tree
+      const realHost = result.realHostPath!;
+      let hasEscapingSymlink = false;
+      try {
+        if (fs.statSync(realHost).isDirectory()) {
+          for (const entry of fs.readdirSync(realHost)) {
+            const entryPath = path.join(realHost, entry);
+            const entryLstat = fs.lstatSync(entryPath);
+            if (entryLstat.isSymbolicLink()) {
+              const target = fs.realpathSync(entryPath);
+              if (!target.startsWith(realHost + path.sep) && target !== realHost) {
+                logger.warn(
+                  { group: groupName, symlink: entryPath, target },
+                  'Mount rejected: contains symlink escaping allowed tree',
+                );
+                hasEscapingSymlink = true;
+                break;
+              }
+            }
+          }
+        }
+      } catch { /* ignore scan errors, proceed with mount */ }
+
+      if (hasEscapingSymlink) {
+        logger.warn(
+          { group: groupName, requestedPath: mount.hostPath },
+          'Additional mount REJECTED (escaping symlink)',
+        );
+      } else {
       validatedMounts.push({
-        hostPath: result.realHostPath!,
+        hostPath: realHost,
         containerPath: `/workspace/extra/${result.resolvedContainerPath}`,
         readonly: result.effectiveReadonly!,
       });
@@ -367,6 +396,7 @@ export function validateAdditionalMounts(
         },
         'Mount validated successfully',
       );
+      }
     } else {
       logger.warn(
         {

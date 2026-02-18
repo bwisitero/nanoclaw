@@ -223,37 +223,24 @@ function buildVolumeMounts(
     }, null, 2) + '\n');
   }
 
-  // Mount AWS credentials directory (if it exists) for Bedrock authentication
-  const awsDir = path.join(homeDir, '.aws');
-  if (fs.existsSync(awsDir)) {
-    mounts.push({
-      hostPath: awsDir,
-      containerPath: '/home/node/.aws',
-      readonly: true,
-    });
-  }
+  // AWS credentials flow via readSecrets() through stdin — no mount needed.
 
-  // Sync skills from container/skills/ into each group's .claude/skills/
-  const skillsSrc = path.join(process.cwd(), 'container', 'skills');
-  const skillsDst = path.join(groupSessionsDir, 'skills');
-  if (fs.existsSync(skillsSrc)) {
-    for (const skillDir of fs.readdirSync(skillsSrc)) {
-      const srcDir = path.join(skillsSrc, skillDir);
-      if (!fs.statSync(srcDir).isDirectory()) continue;
-      const dstDir = path.join(skillsDst, skillDir);
-      fs.mkdirSync(dstDir, { recursive: true });
-      for (const file of fs.readdirSync(srcDir)) {
-        const srcFile = path.join(srcDir, file);
-        const dstFile = path.join(dstDir, file);
-        fs.copyFileSync(srcFile, dstFile);
-      }
-    }
-  }
+  // Mount .claude sessions directory
   mounts.push({
     hostPath: groupSessionsDir,
     containerPath: '/home/node/.claude',
     readonly: false,
   });
+
+  // Mount skills source directly as read-only (saves ~100ms/spawn vs copying)
+  const skillsSrc = path.join(process.cwd(), 'container', 'skills');
+  if (fs.existsSync(skillsSrc)) {
+    mounts.push({
+      hostPath: skillsSrc,
+      containerPath: '/home/node/.claude/skills',
+      readonly: true,
+    });
+  }
 
   // Per-group IPC namespace: each group gets its own IPC directory
   // This prevents cross-group privilege escalation via IPC
@@ -466,6 +453,7 @@ export async function runContainerAgent(
     let parseBuffer = '';
     let newSessionId: string | undefined;
     let outputChain = Promise.resolve();
+    let resolved = false;
     let totalInputTokens = 0;
     let totalOutputTokens = 0;
 
@@ -487,20 +475,21 @@ export async function runContainerAgent(
         }
       }
 
-      // Stream-parse for output and progress markers
+      // Stream-parse for output and progress markers (index-based to avoid O(n^2) slicing)
       parseBuffer += chunk;
+      let parseOffset = 0;
 
       // Parse PROGRESS markers (lightweight, no async needed)
       if (onProgress) {
         let progressStart: number;
-        while ((progressStart = parseBuffer.indexOf(PROGRESS_START_MARKER)) !== -1) {
+        while ((progressStart = parseBuffer.indexOf(PROGRESS_START_MARKER, parseOffset)) !== -1) {
           const progressEnd = parseBuffer.indexOf(PROGRESS_END_MARKER, progressStart);
           if (progressEnd === -1) break;
 
           const progressJson = parseBuffer
             .slice(progressStart + PROGRESS_START_MARKER.length, progressEnd)
             .trim();
-          parseBuffer = parseBuffer.slice(progressEnd + PROGRESS_END_MARKER.length);
+          parseOffset = progressEnd + PROGRESS_END_MARKER.length;
 
           try {
             const { tool } = JSON.parse(progressJson);
@@ -514,14 +503,14 @@ export async function runContainerAgent(
       // Parse OUTPUT markers
       if (onOutput) {
         let startIdx: number;
-        while ((startIdx = parseBuffer.indexOf(OUTPUT_START_MARKER)) !== -1) {
+        while ((startIdx = parseBuffer.indexOf(OUTPUT_START_MARKER, parseOffset)) !== -1) {
           const endIdx = parseBuffer.indexOf(OUTPUT_END_MARKER, startIdx);
           if (endIdx === -1) break; // Incomplete pair, wait for more data
 
           const jsonStr = parseBuffer
             .slice(startIdx + OUTPUT_START_MARKER.length, endIdx)
             .trim();
-          parseBuffer = parseBuffer.slice(endIdx + OUTPUT_END_MARKER.length);
+          parseOffset = endIdx + OUTPUT_END_MARKER.length;
 
           try {
             const parsed: ContainerOutput = JSON.parse(jsonStr);
@@ -545,6 +534,31 @@ export async function runContainerAgent(
               'Failed to parse streamed output chunk',
             );
           }
+        }
+      }
+
+      // Single slice at end (replaces per-marker slicing)
+      if (parseOffset > 0) {
+        parseBuffer = parseBuffer.slice(parseOffset);
+      }
+
+      // Cap parseBuffer to prevent unbounded growth from marker-less stdout
+      const PARSE_BUFFER_MAX = 1_000_000; // 1MB
+      if (parseBuffer.length > PARSE_BUFFER_MAX) {
+        const lastMarker = Math.max(
+          parseBuffer.lastIndexOf(OUTPUT_START_MARKER),
+          parseBuffer.lastIndexOf(PROGRESS_START_MARKER),
+        );
+        if (lastMarker > 0) {
+          // Keep from last marker to preserve in-progress pair
+          parseBuffer = parseBuffer.slice(lastMarker);
+        } else {
+          parseBuffer = '';
+        }
+        // Secondary cap: even with a pending marker, don't exceed 2MB
+        if (parseBuffer.length > PARSE_BUFFER_MAX * 2) {
+          logger.warn({ group: group.name, bufferSize: parseBuffer.length }, 'ParseBuffer exceeded secondary cap, discarding');
+          parseBuffer = '';
         }
       }
     });
@@ -618,7 +632,7 @@ export async function runContainerAgent(
     // Reset the idle timeout whenever there's activity (streaming output)
     // But never extend beyond the hard maximum runtime
     const resetTimeout = () => {
-      if (maxRuntimeReached) return; // Don't reset if hard limit reached
+      if (maxRuntimeReached || resolved) return; // Don't reset if hard limit reached or already resolved
       clearTimeout(timeout);
       timeout = setTimeout(() => killOnTimeout('idle'), timeoutMs);
       timeoutResetCount++;
@@ -636,28 +650,24 @@ export async function runContainerAgent(
     };
 
     container.on('close', (code) => {
+      if (resolved) return;
+      resolved = true;
       clearTimeout(timeout);
       clearTimeout(hardTimeout);
       clearTimeout(warnTimeout);
       const duration = Date.now() - startTime;
 
-      if (timedOut) {
-        const ts = new Date().toISOString().replace(/[:.]/g, '-');
-        const timeoutLog = path.join(logsDir, `container-${ts}.log`);
-        const reason = maxRuntimeReached ? 'Max Runtime (Hard Limit)' : 'Idle Timeout';
-        fs.writeFileSync(timeoutLog, [
-          `=== Container Run Log (TIMEOUT) ===`,
-          `Timestamp: ${new Date().toISOString()}`,
-          `Group: ${group.name}`,
-          `Container: ${containerName}`,
-          `Duration: ${duration}ms (${Math.floor(duration / 60000)} minutes)`,
-          `Exit Code: ${code}`,
-          `Timeout Reason: ${reason}`,
-          `Had Streaming Output: ${hadStreamingOutput}`,
-          `Timeout Resets: ${timeoutResetCount}`,
-        ].join('\n'));
+      // Clean up stale IPC snapshots to prevent info leakage between runs
+      const groupIpcDir = path.join(DATA_DIR, 'ipc', input.groupFolder);
+      for (const f of ['available_groups.json', 'current_tasks.json']) {
+        try { fs.unlinkSync(path.join(groupIpcDir, f)); } catch { /* ignore */ }
+      }
 
-        // Record costs for timed-out containers (IPC containers always exit via timeout)
+      // Record cost once (shared across all exit paths)
+      let costRecorded = false;
+      const recordCostOnce = () => {
+        if (costRecorded) return;
+        costRecorded = true;
         if (totalInputTokens > 0 || totalOutputTokens > 0) {
           const model = process.env.ANTHROPIC_MODEL || 'us.anthropic.claude-sonnet-4-5-20250929-v1:0';
           const cost = calculateCost(totalInputTokens, totalOutputTokens, model);
@@ -676,18 +686,32 @@ export async function runContainerAgent(
             });
             writeCostSummary(input.groupFolder);
             logger.info(
-              {
-                group: group.name,
-                cost,
-                inputTokens: totalInputTokens,
-                outputTokens: totalOutputTokens,
-              },
-              'Recorded cost (timeout exit)',
+              { group: group.name, cost, inputTokens: totalInputTokens, outputTokens: totalOutputTokens },
+              'Recorded cost',
             );
           } catch (err) {
             logger.warn({ err, group: group.name }, 'Failed to record cost');
           }
         }
+      };
+
+      if (timedOut) {
+        const ts = new Date().toISOString().replace(/[:.]/g, '-');
+        const timeoutLog = path.join(logsDir, `container-${ts}.log`);
+        const reason = maxRuntimeReached ? 'Max Runtime (Hard Limit)' : 'Idle Timeout';
+        fs.writeFileSync(timeoutLog, [
+          `=== Container Run Log (TIMEOUT) ===`,
+          `Timestamp: ${new Date().toISOString()}`,
+          `Group: ${group.name}`,
+          `Container: ${containerName}`,
+          `Duration: ${duration}ms (${Math.floor(duration / 60000)} minutes)`,
+          `Exit Code: ${code}`,
+          `Timeout Reason: ${reason}`,
+          `Had Streaming Output: ${hadStreamingOutput}`,
+          `Timeout Resets: ${timeoutResetCount}`,
+        ].join('\n'));
+
+        recordCostOnce();
 
         // Timeout after output = idle cleanup, not failure.
         // The agent already sent its response; this is just the
@@ -697,13 +721,18 @@ export async function runContainerAgent(
             { group: group.name, containerName, duration, code },
             'Container timed out after output (idle cleanup)',
           );
-          outputChain.then(() => {
-            resolve({
-              status: 'success',
-              result: null,
-              newSessionId,
+          outputChain
+            .then(() => {
+              resolve({
+                status: 'success',
+                result: null,
+                newSessionId,
+              });
+            })
+            .catch((err) => {
+              logger.error({ group: group.name, err: String(err) }, 'Output chain rejected');
+              resolve({ status: 'error', result: null, error: 'Output processing failed' });
             });
-          });
           return;
         }
 
@@ -800,49 +829,23 @@ export async function runContainerAgent(
 
       // Streaming mode: wait for output chain to settle, return completion marker
       if (onOutput) {
-        outputChain.then(() => {
-          // Record cost if we have token usage
-          if (totalInputTokens > 0 || totalOutputTokens > 0) {
-            const model = process.env.ANTHROPIC_MODEL || 'us.anthropic.claude-sonnet-4-5-20250929-v1:0';
-            const cost = calculateCost(totalInputTokens, totalOutputTokens, model);
-            try {
-              recordCost({
-                timestamp: new Date().toISOString(),
-                chat_jid: input.chatJid,
-                group_folder: input.groupFolder,
-                input_tokens: totalInputTokens,
-                output_tokens: totalOutputTokens,
-                model,
-                cost_usd: cost,
-                session_id: newSessionId,
-                container_name: containerName,
-                duration_ms: duration,
-              });
-              writeCostSummary(input.groupFolder);
-              logger.info(
-                {
-                  group: group.name,
-                  cost,
-                  inputTokens: totalInputTokens,
-                  outputTokens: totalOutputTokens,
-                },
-                'Recorded cost',
-              );
-            } catch (err) {
-              logger.warn({ err, group: group.name }, 'Failed to record cost');
-            }
-          }
-
-          logger.info(
-            { group: group.name, duration, newSessionId },
-            'Container completed (streaming mode)',
-          );
-          resolve({
-            status: 'success',
-            result: null,
-            newSessionId,
+        outputChain
+          .then(() => {
+            recordCostOnce();
+            logger.info(
+              { group: group.name, duration, newSessionId },
+              'Container completed (streaming mode)',
+            );
+            resolve({
+              status: 'success',
+              result: null,
+              newSessionId,
+            });
+          })
+          .catch((err) => {
+            logger.error({ group: group.name, err: String(err) }, 'Output chain rejected');
+            resolve({ status: 'error', result: null, error: 'Output processing failed' });
           });
-        });
         return;
       }
 
@@ -865,37 +868,13 @@ export async function runContainerAgent(
 
         const output: ContainerOutput = JSON.parse(jsonLine);
 
-        // Record cost if we have token usage
+        // Record cost from legacy mode output
         if (output.usage) {
-          const model = process.env.ANTHROPIC_MODEL || 'us.anthropic.claude-sonnet-4-5-20250929-v1:0';
-          const cost = calculateCost(output.usage.input_tokens, output.usage.output_tokens, model);
-          try {
-            recordCost({
-              timestamp: new Date().toISOString(),
-              chat_jid: input.chatJid,
-              group_folder: input.groupFolder,
-              input_tokens: output.usage.input_tokens,
-              output_tokens: output.usage.output_tokens,
-              model,
-              cost_usd: cost,
-              session_id: output.newSessionId,
-              container_name: containerName,
-              duration_ms: duration,
-            });
-            writeCostSummary(input.groupFolder);
-            logger.debug(
-              {
-                group: group.name,
-                cost,
-                inputTokens: output.usage.input_tokens,
-                outputTokens: output.usage.output_tokens,
-              },
-              'Recorded cost',
-            );
-          } catch (err) {
-            logger.warn({ err, group: group.name }, 'Failed to record cost');
-          }
+          totalInputTokens += output.usage.input_tokens;
+          totalOutputTokens += output.usage.output_tokens;
+          if (output.newSessionId) newSessionId = output.newSessionId;
         }
+        recordCostOnce();
 
         logger.info(
           {
@@ -928,7 +907,11 @@ export async function runContainerAgent(
     });
 
     container.on('error', (err) => {
+      if (resolved) return;
+      resolved = true;
       clearTimeout(timeout);
+      clearTimeout(hardTimeout);
+      clearTimeout(warnTimeout);
       logger.error({ group: group.name, containerName, error: err }, 'Container spawn error');
       resolve({
         status: 'error',

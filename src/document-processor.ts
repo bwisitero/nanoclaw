@@ -5,9 +5,12 @@
  */
 
 import crypto from 'crypto';
-import { execFileSync, execSync } from 'child_process';
+import { execFile, execFileSync, execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+import { promisify } from 'util';
+
+const execFileAsync = promisify(execFile);
 
 import {
   deleteDocumentChunks,
@@ -24,6 +27,7 @@ import { logger } from './logger.js';
 const CHUNK_SIZE = 2000; // ~500 tokens
 const CHUNK_OVERLAP = 200; // ~50 tokens
 const EMBED_BATCH_SIZE = 32; // Texts per embedding batch
+const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB max file size
 
 const SUPPORTED_EXTENSIONS = new Set([
   '.pdf', '.csv', '.txt', '.md',
@@ -36,8 +40,8 @@ const SUPPORTED_EXTENSIONS = new Set([
  */
 function displayName(filePath: string): string {
   const basename = path.basename(filePath);
-  // Match timestamp prefix: digits followed by a dash
-  return basename.replace(/^\d{10,}-/, '');
+  // Match timestamp prefix: digits followed by a dash, then sanitize
+  return basename.replace(/^\d{10,}-/, '').replace(/[/\\]/g, '_').replace(/\.\./g, '__');
 }
 
 /**
@@ -55,11 +59,10 @@ interface ExtractionResult {
   pages: string[]; // Text split by page (single element for non-PDFs)
 }
 
-function extractPdf(filePath: string): ExtractionResult | null {
+async function extractPdf(filePath: string): Promise<ExtractionResult | null> {
   try {
     // Try pdftotext -layout first (preserves table columns)
-    // Use execFileSync to avoid shell interpretation of file paths
-    const text = execFileSync('pdftotext', ['-layout', filePath, '-'], {
+    const { stdout: text } = await execFileAsync('pdftotext', ['-layout', filePath, '-'], {
       encoding: 'utf-8',
       maxBuffer: 50 * 1024 * 1024, // 50MB
       timeout: 60000,
@@ -67,7 +70,7 @@ function extractPdf(filePath: string): ExtractionResult | null {
 
     if (text.trim().length < 50) {
       // Very little text — might be a scanned PDF, try without -layout
-      const fallback = execFileSync('pdftotext', [filePath, '-'], {
+      const { stdout: fallback } = await execFileAsync('pdftotext', [filePath, '-'], {
         encoding: 'utf-8',
         maxBuffer: 50 * 1024 * 1024,
         timeout: 60000,
@@ -141,7 +144,7 @@ function extractImage(filePath: string): ExtractionResult | null {
   }
 }
 
-function extractDocument(filePath: string): ExtractionResult | null {
+async function extractDocument(filePath: string): Promise<ExtractionResult | null> {
   const ext = path.extname(filePath).toLowerCase();
 
   switch (ext) {
@@ -218,7 +221,7 @@ function chunkText(pages: string[], chunkSize: number = CHUNK_SIZE, overlap: num
  * Process a single document: extract text, chunk, store in SQLite.
  * Returns number of chunks created, or 0 if skipped/failed.
  */
-export function processDocument(filePath: string, groupFolder: string): number {
+export async function processDocument(filePath: string, groupFolder: string): Promise<number> {
   if (!fs.existsSync(filePath)) {
     logger.warn({ filePath }, 'File not found');
     return 0;
@@ -226,6 +229,13 @@ export function processDocument(filePath: string, groupFolder: string): number {
 
   const ext = path.extname(filePath).toLowerCase();
   if (!SUPPORTED_EXTENSIONS.has(ext)) {
+    return 0;
+  }
+
+  // Reject oversized files to prevent DoS
+  const stat = fs.statSync(filePath);
+  if (stat.size > MAX_FILE_SIZE) {
+    logger.warn({ filePath, size: stat.size, maxSize: MAX_FILE_SIZE }, 'File exceeds size limit, skipping');
     return 0;
   }
 
@@ -242,7 +252,7 @@ export function processDocument(filePath: string, groupFolder: string): number {
   }
 
   // Extract text
-  const extraction = extractDocument(filePath);
+  const extraction = await extractDocument(filePath);
   if (!extraction || extraction.text.trim().length === 0) {
     logger.info({ filePath }, 'No text extracted');
     return 0;
@@ -281,7 +291,7 @@ export function processDocument(filePath: string, groupFolder: string): number {
  * Skips already-indexed files (by content hash).
  * Returns total chunks created.
  */
-export function processAllDocuments(groupFolder: string): number {
+export async function processAllDocuments(groupFolder: string): Promise<number> {
   const uploadsDir = path.join(process.cwd(), 'groups', groupFolder, 'uploads');
   if (!fs.existsSync(uploadsDir)) {
     logger.debug({ groupFolder }, 'No uploads directory');
@@ -297,7 +307,7 @@ export function processAllDocuments(groupFolder: string): number {
   for (const file of files) {
     const filePath = path.join(uploadsDir, file);
     try {
-      totalChunks += processDocument(filePath, groupFolder);
+      totalChunks += await processDocument(filePath, groupFolder);
     } catch (err) {
       logger.error({ file, err }, 'Failed to process document');
     }
@@ -341,8 +351,8 @@ export async function generateEmbeddings(groupFolder: string): Promise<number> {
 export async function indexAllDocuments(groupFolder: string): Promise<void> {
   logger.info({ groupFolder }, 'Starting document indexing');
 
-  // Phase 1: Extract and chunk (synchronous, fast)
-  const chunks = processAllDocuments(groupFolder);
+  // Phase 1: Extract and chunk
+  const chunks = await processAllDocuments(groupFolder);
   if (chunks > 0) {
     logger.info({ groupFolder, chunks }, 'Documents extracted and chunked');
   }
@@ -387,11 +397,11 @@ export function watchUploads(
     setTimeout(() => recentFiles.delete(filename), 5000);
 
     // Wait a moment for the file to be fully written
-    setTimeout(() => {
+    setTimeout(async () => {
       if (!fs.existsSync(filePath)) return;
 
       try {
-        const chunks = processDocument(filePath, groupFolder);
+        const chunks = await processDocument(filePath, groupFolder);
         if (chunks > 0) {
           onNewFile?.(filePath);
           // Generate embeddings in background

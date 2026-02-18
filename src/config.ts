@@ -54,6 +54,9 @@ export const TRIGGER_PATTERN = new RegExp(
 export const TIMEZONE =
   process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone;
 
+// Display cost summary after each interaction (tokens in/out and USD cost)
+export const SHOW_COST = process.env.SHOW_COST !== 'false'; // default: true
+
 // Telegram configuration
 export const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 export const TELEGRAM_ONLY = process.env.TELEGRAM_ONLY === 'true';

@@ -80,7 +80,7 @@ export interface TaskRunLog {
 export interface Channel {
   name: string;
   connect(): Promise<void>;
-  sendMessage(jid: string, text: string): Promise<void>;
+  sendMessage(jid: string, text: string): Promise<string | void>;
   isConnected(): boolean;
   ownsJid(jid: string): boolean;
   disconnect(): Promise<void>;
@@ -88,6 +88,10 @@ export interface Channel {
   setTyping?(jid: string, isTyping: boolean): Promise<void>;
   // Optional: file sending. Channels that support it implement it.
   sendFile?(jid: string, filePath: string, caption?: string): Promise<void>;
+  // Optional: edit a previously sent message (Telegram only).
+  editMessage?(jid: string, messageId: string, text: string): Promise<void>;
+  // Optional: delete a previously sent message (Telegram only).
+  deleteMessage?(jid: string, messageId: string): Promise<void>;
   // Whether to prefix outbound messages with the assistant name.
   // Telegram bots already display their name, so they return false.
   // WhatsApp returns true. Default true if not implemented.

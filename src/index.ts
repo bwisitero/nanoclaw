@@ -9,6 +9,7 @@ import {
   IDLE_TIMEOUT,
   MAIN_GROUP_FOLDER,
   POLL_INTERVAL,
+  SHOW_COST,
   TELEGRAM_BOT_TOKEN,
   TELEGRAM_ONLY,
   TRIGGER_PATTERN,
@@ -16,6 +17,7 @@ import {
 import { WhatsAppChannel } from './channels/whatsapp.js';
 import { TelegramChannel } from './channels/telegram.js';
 import {
+  calculateCost,
   ContainerOutput,
   runContainerAgent,
   writeGroupsSnapshot,
@@ -47,6 +49,25 @@ import { logger } from './logger.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
+
+// Tool name → friendly progress description for live Telegram updates
+const TOOL_PROGRESS: Record<string, string> = {
+  search_documents: '\u{1F50D} Searching documents...',
+  search_conversations: '\u{1F4AC} Searching conversations...',
+  semantic_search: '\u{1F9E0} Semantic search...',
+  Read: '\u{1F4D6} Reading files...',
+  Write: '\u{270F}\u{FE0F} Writing files...',
+  Edit: '\u{270F}\u{FE0F} Editing files...',
+  Bash: '\u{2699}\u{FE0F} Running commands...',
+  WebSearch: '\u{1F310} Searching the web...',
+  WebFetch: '\u{1F310} Fetching web content...',
+  Glob: '\u{1F4C2} Scanning files...',
+  Grep: '\u{1F50E} Searching code...',
+  Task: '\u{1F916} Delegating to sub-agent...',
+  mcp__tavily__tavily_search: '\u{1F310} Searching the web...',
+  mcp__nanoclaw__send_message: '\u{1F4AC} Sending message...',
+};
+const DEFAULT_PROGRESS = '\u{23F3} Processing...';
 
 let lastTimestamp = '';
 let sessions: Record<string, string> = {};
@@ -209,31 +230,50 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   await channel.setTyping?.(chatJid, true);
   let hadError = false;
   let outputSentToUser = false;
+  // Track the cursor at the time of last successful output so we can roll
+  // back follow-up messages that were piped but never got a response.
+  let lastConfirmedCursor = lastAgentTimestamp[chatJid] || '';
 
   // Keep typing indicator alive during processing
   const typingInterval = setInterval(() => {
     channel.setTyping?.(chatJid, true);
   }, 4000); // Refresh every 4 seconds
 
-  // Send quick acknowledgment for Telegram so user knows we're working
-  if (channel.name === 'telegram') {
-    // Wait a moment to see if agent responds quickly
-    const ackTimer = setTimeout(async () => {
-      await channel.sendMessage(chatJid, '⏳ Working on it...');
-      outputSentToUser = true; // Mark so we don't roll back cursor on error
-    }, 3000); // If no response in 3 seconds, send acknowledgment
+  // Track whether the agent used tools (for null-result detection)
+  let agentUsedTools = false;
 
-    // Clear ack timer if we get a result quickly (handled in callback below)
-    (resetIdleTimer as any).ackTimer = ackTimer;
-  }
+  // Progress message state (Telegram only — channels with editMessage support)
+  let progressMessageId: string | null = null;
+  // Promise that resolves once the initial progress message has been sent.
+  // onProgress awaits this to avoid racing with the timer's sendMessage call.
+  let progressReady: Promise<void> = Promise.resolve();
+  // Serialize editMessage calls so rapid tool invocations don't cause out-of-order updates
+  let editChain: Promise<void> = Promise.resolve();
+
+  // Send initial progress message after a short delay (only for channels that support editing)
+  const progressTimer = channel.editMessage
+    ? setTimeout(() => {
+        progressReady = (async () => {
+          const id = await channel.sendMessage(chatJid, '\u{23F3} Analyzing your request...');
+          if (typeof id === 'string') {
+            progressMessageId = id;
+          }
+        })();
+      }, 2000)
+    : null;
 
   const output = await runAgent(group, prompt, chatJid, async (result) => {
     // Streaming output callback — called for each agent result
     if (result.result) {
-      // Clear acknowledgment timer since we have a real result
-      if ((resetIdleTimer as any).ackTimer) {
-        clearTimeout((resetIdleTimer as any).ackTimer);
-        (resetIdleTimer as any).ackTimer = null;
+      // Cancel progress timer if it hasn't fired yet
+      if (progressTimer) clearTimeout(progressTimer);
+      // Wait for any in-flight progress message send/edit to settle
+      await progressReady;
+      await editChain;
+      // Delete progress message before sending real output
+      if (progressMessageId && channel.deleteMessage) {
+        await channel.deleteMessage(chatJid, progressMessageId);
+        progressMessageId = null;
       }
 
       const raw = typeof result.result === 'string' ? result.result : JSON.stringify(result.result);
@@ -242,29 +282,100 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       if (formatted) {
         await channel.sendMessage(chatJid, formatted);
         outputSentToUser = true;
+        // Snapshot the cursor at the time output was delivered — any messages
+        // piped after this point can be safely rolled back on container error.
+        lastConfirmedCursor = lastAgentTimestamp[chatJid] || lastConfirmedCursor;
+
+        // Send per-turn cost footer
+        if (SHOW_COST && result.usage) {
+          const model = process.env.ANTHROPIC_MODEL || 'us.anthropic.claude-sonnet-4-5-20250929-v1:0';
+          const cost = calculateCost(result.usage.input_tokens, result.usage.output_tokens, model);
+          const fmt = (n: number) => n >= 1000 ? `${(n / 1000).toFixed(1)}K` : `${n}`;
+          const costLine = `_\u{1F4B0} ${fmt(result.usage.input_tokens)} in \u{00B7} ${fmt(result.usage.output_tokens)} out \u{00B7} $${cost.toFixed(4)}_`;
+          await channel.sendMessage(chatJid, costLine);
+        }
       }
       // Only reset idle timer on actual results, not session-update markers (result: null)
       resetIdleTimer();
+      agentUsedTools = false;
+    } else if (result.result === null && agentUsedTools) {
+      // Agent used tools but returned no text — the user would see silence.
+      // Send a fallback so the user knows the turn completed.
+      logger.warn({ group: group.name }, 'Agent returned null result after using tools — sending fallback');
+      if (progressTimer) clearTimeout(progressTimer);
+      await progressReady;
+      await editChain;
+      if (progressMessageId && channel.deleteMessage) {
+        await channel.deleteMessage(chatJid, progressMessageId);
+        progressMessageId = null;
+      }
+      await channel.sendMessage(chatJid, '_Task completed (no response from agent)_');
+      outputSentToUser = true;
+      lastConfirmedCursor = lastAgentTimestamp[chatJid] || lastConfirmedCursor;
+      resetIdleTimer();
+      // Reset for next piped turn
+      agentUsedTools = false;
     }
 
     if (result.status === 'error') {
       hadError = true;
     }
+  }, (tool: string) => {
+    // Progress update — edit the progress message with current tool description.
+    // Serialized through editChain to guarantee ordering and awaits progressReady
+    // to handle the race between the timer's sendMessage and early tool calls.
+    agentUsedTools = true;
+    if (!channel.editMessage) return;
+    const description = TOOL_PROGRESS[tool] || DEFAULT_PROGRESS;
+    logger.debug({ group: group.name, tool, hasProgressMsg: !!progressMessageId }, 'onProgress fired');
+    editChain = editChain
+      .then(() => progressReady)
+      .then(async () => {
+        if (!progressMessageId) {
+          // No active progress message (first tool call, or previous turn's
+          // message was deleted). Create a new one for this turn.
+          logger.info({ group: group.name, description }, 'Creating new progress message');
+          const id = await channel.sendMessage(chatJid, description);
+          if (typeof id === 'string') {
+            progressMessageId = id;
+            logger.info({ group: group.name, progressMessageId: id }, 'Progress message created');
+          }
+          return;
+        }
+        logger.debug({ group: group.name, progressMessageId, description }, 'Editing progress message');
+        return channel.editMessage!(chatJid, progressMessageId, description);
+      })
+      .catch((err) => {
+        logger.warn({ group: group.name, err }, 'Progress update failed');
+      });
   });
 
   // Clean up typing indicator and timers
   clearInterval(typingInterval);
-  if ((resetIdleTimer as any).ackTimer) {
-    clearTimeout((resetIdleTimer as any).ackTimer);
+  if (progressTimer) clearTimeout(progressTimer);
+  await progressReady;
+  await editChain;
+  if (progressMessageId && channel.deleteMessage) {
+    channel.deleteMessage(chatJid, progressMessageId).catch(() => {});
   }
   await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
 
   if (output === 'error' || hadError) {
-    // If we already sent output to the user, don't roll back the cursor —
-    // the user got their response and re-processing would send duplicates.
     if (outputSentToUser) {
-      logger.warn({ group: group.name }, 'Agent error after output was sent, skipping cursor rollback to prevent duplicates');
+      // Output was sent, but follow-up messages may have been piped after
+      // the last response.  Roll back to lastConfirmedCursor so those
+      // unprocessed messages get re-queued on the next loop iteration.
+      if (lastAgentTimestamp[chatJid] !== lastConfirmedCursor) {
+        lastAgentTimestamp[chatJid] = lastConfirmedCursor;
+        saveState();
+        logger.warn(
+          { group: group.name, rolledBackTo: lastConfirmedCursor },
+          'Agent error after output — rolled back cursor to recover piped messages',
+        );
+      } else {
+        logger.warn({ group: group.name }, 'Agent error after output was sent, no piped messages to recover');
+      }
       return true;
     }
     // Roll back cursor so retries can re-process these messages
@@ -282,6 +393,7 @@ async function runAgent(
   prompt: string,
   chatJid: string,
   onOutput?: (output: ContainerOutput) => Promise<void>,
+  onProgress?: (tool: string) => void,
 ): Promise<'success' | 'error'> {
   const isMain = group.folder === MAIN_GROUP_FOLDER;
   const sessionId = sessions[group.folder];
@@ -334,6 +446,7 @@ async function runAgent(
       },
       (proc, containerName) => queue.registerProcess(chatJid, proc, containerName, group.folder),
       wrappedOnOutput,
+      onProgress,
     );
 
     if (output.newSessionId) {
@@ -541,9 +654,10 @@ function ensureContainerSystemRunning(): void {
     let orphans: string[] = [];
 
     if (runtime === 'docker') {
-      // Docker: list ALL containers using our image (catches random-named containers too)
+      // Docker: list ALL containers with nanoclaw- prefix (name-based, not image-based,
+      // because ancestor filter breaks after image rebuilds change the image hash)
       const output = execSync(
-        'docker ps -a --filter "ancestor=nanoclaw-agent:latest" --format "{{.Names}}"',
+        'docker ps -a --filter "name=nanoclaw-" --format "{{.Names}}"',
         {
           stdio: ['pipe', 'pipe', 'pipe'],
           encoding: 'utf-8',
@@ -645,10 +759,10 @@ async function main(): Promise<void> {
     },
   });
   startIpcWatcher({
-    sendMessage: (jid, text) => {
+    sendMessage: async (jid, text) => {
       const channel = findChannel(channels, jid);
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
-      return channel.sendMessage(jid, text);
+      await channel.sendMessage(jid, text);
     },
     sendFile: async (jid, filePath, groupFolder, caption) => {
       const channel = findChannel(channels, jid);

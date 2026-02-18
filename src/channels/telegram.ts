@@ -590,7 +590,7 @@ export class TelegramChannel implements Channel {
     });
   }
 
-  async sendMessage(jid: string, text: string): Promise<void> {
+  async sendMessage(jid: string, text: string): Promise<string | void> {
     if (!this.bot) {
       logger.warn('Telegram bot not initialized');
       return;
@@ -601,17 +601,31 @@ export class TelegramChannel implements Channel {
 
       // Telegram has a 4096 character limit per message — split if needed
       const MAX_LENGTH = 4096;
+      let lastMessageId: string | undefined;
+
+      // Helper: send a single chunk with Markdown, falling back to plain text
+      const sendChunk = async (chunk: string): Promise<string> => {
+        try {
+          const sent = await this.bot!.api.sendMessage(numericId, chunk, {
+            parse_mode: 'Markdown',
+          });
+          return sent.message_id.toString();
+        } catch {
+          // Markdown parse failed (unmatched delimiters, etc.) — send as plain text
+          const sent = await this.bot!.api.sendMessage(numericId, chunk);
+          return sent.message_id.toString();
+        }
+      };
+
       if (text.length <= MAX_LENGTH) {
-        await this.bot.api.sendMessage(numericId, text);
+        lastMessageId = await sendChunk(text);
       } else {
         for (let i = 0; i < text.length; i += MAX_LENGTH) {
-          await this.bot.api.sendMessage(
-            numericId,
-            text.slice(i, i + MAX_LENGTH),
-          );
+          lastMessageId = await sendChunk(text.slice(i, i + MAX_LENGTH));
         }
       }
       logger.info({ jid, length: text.length }, 'Telegram message sent');
+      return lastMessageId;
     } catch (err) {
       logger.error({ jid, err }, 'Failed to send Telegram message');
     }
@@ -677,6 +691,32 @@ export class TelegramChannel implements Channel {
     } catch (err) {
       logger.error({ jid, filePath, err }, 'Failed to send Telegram file');
       throw err;
+    }
+  }
+
+  async editMessage(jid: string, messageId: string, text: string): Promise<void> {
+    if (!this.bot) return;
+    try {
+      const chatId = jid.replace(/^tg:/, '');
+      try {
+        await this.bot.api.editMessageText(chatId, Number(messageId), text, {
+          parse_mode: 'Markdown',
+        });
+      } catch {
+        await this.bot.api.editMessageText(chatId, Number(messageId), text);
+      }
+    } catch (err) {
+      logger.debug({ jid, messageId, err }, 'Failed to edit Telegram message');
+    }
+  }
+
+  async deleteMessage(jid: string, messageId: string): Promise<void> {
+    if (!this.bot) return;
+    try {
+      const chatId = jid.replace(/^tg:/, '');
+      await this.bot.api.deleteMessage(chatId, Number(messageId));
+    } catch (err) {
+      logger.debug({ jid, messageId, err }, 'Failed to delete Telegram message');
     }
   }
 

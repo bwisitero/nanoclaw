@@ -110,11 +110,19 @@ async function readStdin(): Promise<string> {
 
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
 const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
+const PROGRESS_START_MARKER = '---NANOCLAW_PROGRESS_START---';
+const PROGRESS_END_MARKER = '---NANOCLAW_PROGRESS_END---';
 
 function writeOutput(output: ContainerOutput): void {
   console.log(OUTPUT_START_MARKER);
   console.log(JSON.stringify(output));
   console.log(OUTPUT_END_MARKER);
+}
+
+function writeProgress(toolName: string): void {
+  console.log(PROGRESS_START_MARKER);
+  console.log(JSON.stringify({ tool: toolName }));
+  console.log(PROGRESS_END_MARKER);
 }
 
 function log(message: string): void {
@@ -192,6 +200,40 @@ function createPreCompactHook(): HookCallback {
 // These are needed by claude-code for API auth but should never
 // be visible to commands Kit runs.
 const SECRET_ENV_VARS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'];
+
+function createProgressHook(): HookCallback {
+  return async (input) => {
+    const preInput = input as PreToolUseHookInput;
+    writeProgress(preInput.tool_name);
+    return {};
+  };
+}
+
+// Block tools that don't work with our scopes and redirect to working alternatives
+const BLOCKED_TOOLS: Record<string, string> = {
+  'mcp__google-workspace__gmail_bulk_delete_messages':
+    'This tool requires gmail.delete scope which is not available. Use the Python script instead:\n' +
+    "python3 /home/node/.claude/skills/gmail-bulk-delete/gmail-bulk-trash.py 'your search query'\n" +
+    'The script uses batchModify with TRASH label (works with gmail.modify scope).',
+};
+
+function createBlockToolsHook(): HookCallback {
+  return async (input) => {
+    const preInput = input as PreToolUseHookInput;
+    const reason = BLOCKED_TOOLS[preInput.tool_name];
+    if (reason) {
+      log(`Blocking tool ${preInput.tool_name}: redirecting to alternative`);
+      return {
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'deny' as const,
+          permissionDecisionReason: reason,
+        },
+      };
+    }
+    return {};
+  };
+}
 
 function createSanitizeBashHook(): HookCallback {
   return async (input, _toolUseId, _context) => {
@@ -428,7 +470,9 @@ async function runQuery(
     log(`Additional directories: ${extraDirs.join(', ')}`);
   }
 
-  // Load MCP servers from settings.json and merge with nanoclaw MCP
+  // Load MCP servers from settings.json and merge with nanoclaw MCP.
+  // Resolve ${VAR} references in MCP env from sdkEnv, since the SDK may
+  // only substitute from process.env (which doesn't contain our secrets).
   const settingsPath = '/home/node/.claude/settings.json';
   let userMcpServers: Record<string, any> = {};
   if (fs.existsSync(settingsPath)) {
@@ -436,6 +480,23 @@ async function runQuery(
       const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
       if (settings.mcpServers) {
         userMcpServers = settings.mcpServers;
+        // Resolve ${VAR} references in each MCP server's env block
+        for (const [serverName, serverConfig] of Object.entries(userMcpServers)) {
+          const cfg = serverConfig as { env?: Record<string, string> };
+          if (cfg.env) {
+            for (const [key, value] of Object.entries(cfg.env)) {
+              if (typeof value === 'string' && value.startsWith('${') && value.endsWith('}')) {
+                const varName = value.slice(2, -1);
+                const resolved = sdkEnv[varName];
+                if (resolved) {
+                  cfg.env[key] = resolved;
+                } else {
+                  log(`Warning: MCP server '${serverName}' env var ${key} references unset variable ${varName}`);
+                }
+              }
+            }
+          }
+        }
         log(`Loaded ${Object.keys(userMcpServers).length} MCP server(s) from settings.json: ${Object.keys(userMcpServers).join(', ')}`);
       }
     } catch (err) {
@@ -484,7 +545,11 @@ async function runQuery(
       mcpServers,
       hooks: {
         PreCompact: [{ hooks: [createPreCompactHook()] }],
-        PreToolUse: [{ matcher: 'Bash', hooks: [createSanitizeBashHook()] }],
+        PreToolUse: [
+          { hooks: [createProgressHook()] },
+          { hooks: [createBlockToolsHook()] },
+          { matcher: 'Bash', hooks: [createSanitizeBashHook()] },
+        ],
       },
     }
   })) {

@@ -52,6 +52,8 @@ function getContainerRuntime(): 'docker' | 'container' {
 // Sentinel markers for robust output parsing (must match agent-runner)
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
 const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
+const PROGRESS_START_MARKER = '---NANOCLAW_PROGRESS_START---';
+const PROGRESS_END_MARKER = '---NANOCLAW_PROGRESS_END---';
 
 // Bedrock pricing (us-east-1) - dollars per million tokens
 const BEDROCK_PRICING: Record<string, { input: number; output: number }> = {
@@ -60,7 +62,7 @@ const BEDROCK_PRICING: Record<string, { input: number; output: number }> = {
   'us.anthropic.claude-opus-4-6-20250514-v1:0': { input: 15.0, output: 75.0 },
 };
 
-function calculateCost(inputTokens: number, outputTokens: number, model: string): number {
+export function calculateCost(inputTokens: number, outputTokens: number, model: string): number {
   const pricing = BEDROCK_PRICING[model] || BEDROCK_PRICING['us.anthropic.claude-sonnet-4-5-20250929-v1:0'];
   const inputCost = (inputTokens / 1_000_000) * pricing.input;
   const outputCost = (outputTokens / 1_000_000) * pricing.output;
@@ -402,6 +404,7 @@ export async function runContainerAgent(
   input: ContainerInput,
   onProcess: (proc: ChildProcess, containerName: string) => void,
   onOutput?: (output: ContainerOutput) => Promise<void>,
+  onProgress?: (tool: string) => void,
 ): Promise<ContainerOutput> {
   const startTime = Date.now();
 
@@ -484,9 +487,32 @@ export async function runContainerAgent(
         }
       }
 
-      // Stream-parse for output markers
+      // Stream-parse for output and progress markers
+      parseBuffer += chunk;
+
+      // Parse PROGRESS markers (lightweight, no async needed)
+      if (onProgress) {
+        let progressStart: number;
+        while ((progressStart = parseBuffer.indexOf(PROGRESS_START_MARKER)) !== -1) {
+          const progressEnd = parseBuffer.indexOf(PROGRESS_END_MARKER, progressStart);
+          if (progressEnd === -1) break;
+
+          const progressJson = parseBuffer
+            .slice(progressStart + PROGRESS_START_MARKER.length, progressEnd)
+            .trim();
+          parseBuffer = parseBuffer.slice(progressEnd + PROGRESS_END_MARKER.length);
+
+          try {
+            const { tool } = JSON.parse(progressJson);
+            if (tool) onProgress(tool);
+          } catch {
+            // Ignore malformed progress markers
+          }
+        }
+      }
+
+      // Parse OUTPUT markers
       if (onOutput) {
-        parseBuffer += chunk;
         let startIdx: number;
         while ((startIdx = parseBuffer.indexOf(OUTPUT_START_MARKER)) !== -1) {
           const endIdx = parseBuffer.indexOf(OUTPUT_END_MARKER, startIdx);
@@ -631,6 +657,38 @@ export async function runContainerAgent(
           `Timeout Resets: ${timeoutResetCount}`,
         ].join('\n'));
 
+        // Record costs for timed-out containers (IPC containers always exit via timeout)
+        if (totalInputTokens > 0 || totalOutputTokens > 0) {
+          const model = process.env.ANTHROPIC_MODEL || 'us.anthropic.claude-sonnet-4-5-20250929-v1:0';
+          const cost = calculateCost(totalInputTokens, totalOutputTokens, model);
+          try {
+            recordCost({
+              timestamp: new Date().toISOString(),
+              chat_jid: input.chatJid,
+              group_folder: input.groupFolder,
+              input_tokens: totalInputTokens,
+              output_tokens: totalOutputTokens,
+              model,
+              cost_usd: cost,
+              session_id: newSessionId,
+              container_name: containerName,
+              duration_ms: duration,
+            });
+            writeCostSummary(input.groupFolder);
+            logger.info(
+              {
+                group: group.name,
+                cost,
+                inputTokens: totalInputTokens,
+                outputTokens: totalOutputTokens,
+              },
+              'Recorded cost (timeout exit)',
+            );
+          } catch (err) {
+            logger.warn({ err, group: group.name }, 'Failed to record cost');
+          }
+        }
+
         // Timeout after output = idle cleanup, not failure.
         // The agent already sent its response; this is just the
         // container being reaped after the idle period expired.
@@ -761,7 +819,7 @@ export async function runContainerAgent(
                 duration_ms: duration,
               });
               writeCostSummary(input.groupFolder);
-              logger.debug(
+              logger.info(
                 {
                   group: group.name,
                   cost,

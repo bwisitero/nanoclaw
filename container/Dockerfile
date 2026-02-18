@@ -34,6 +34,9 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
     cp /root/.local/bin/uv /usr/local/bin/ && \
     cp /root/.local/bin/uvx /usr/local/bin/
 
+# Install Python Google libraries for Gmail bulk-trash script
+RUN pip3 install --break-system-packages google-auth google-auth-oauthlib google-api-python-client
+
 # Set Chromium path for agent-browser
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium

@@ -25,16 +25,37 @@ if len(sys.argv) != 2:
 
 query = sys.argv[1]
 
-# Get credentials from environment
+# Get credentials from environment, falling back to settings.json
 client_id = os.environ.get('GOOGLE_WORKSPACE_CLIENT_ID')
 client_secret = os.environ.get('GOOGLE_WORKSPACE_CLIENT_SECRET')
 refresh_token = os.environ.get('GOOGLE_WORKSPACE_REFRESH_TOKEN')
 
 if not all([client_id, client_secret, refresh_token]):
-    print("ERROR: Missing required environment variables:")
-    print("  GOOGLE_WORKSPACE_CLIENT_ID")
-    print("  GOOGLE_WORKSPACE_CLIENT_SECRET")
-    print("  GOOGLE_WORKSPACE_REFRESH_TOKEN")
+    # Try loading from settings.json (per-user MCP config)
+    import json
+    settings_path = os.path.expanduser('~/.claude/settings.json')
+    if os.path.exists(settings_path):
+        try:
+            with open(settings_path) as f:
+                settings = json.load(f)
+            gw_env = settings.get('mcpServers', {}).get('google-workspace', {}).get('env', {})
+            client_id = client_id or gw_env.get('GOOGLE_WORKSPACE_CLIENT_ID', '')
+            client_secret = client_secret or gw_env.get('GOOGLE_WORKSPACE_CLIENT_SECRET', '')
+            refresh_token = refresh_token or gw_env.get('GOOGLE_WORKSPACE_REFRESH_TOKEN', '')
+            # Resolve ${VAR} references from environment
+            for name, val in [('client_id', client_id), ('client_secret', client_secret), ('refresh_token', refresh_token)]:
+                if val.startswith('${') and val.endswith('}'):
+                    env_val = os.environ.get(val[2:-1], '')
+                    if env_val:
+                        if name == 'client_id': client_id = env_val
+                        elif name == 'client_secret': client_secret = env_val
+                        elif name == 'refresh_token': refresh_token = env_val
+        except Exception as e:
+            print(f"Warning: Failed to read settings.json: {e}")
+
+if not all([client_id, client_secret, refresh_token]):
+    print("ERROR: Missing Google credentials.")
+    print("Set environment variables or configure in ~/.claude/settings.json")
     sys.exit(1)
 
 # Create credentials

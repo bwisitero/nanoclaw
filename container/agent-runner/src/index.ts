@@ -199,15 +199,7 @@ function createPreCompactHook(): HookCallback {
 // Secrets to strip from Bash tool subprocess environments.
 // These are needed by claude-code for API auth but should never
 // be visible to commands the agent runs via Bash tool.
-// AWS creds are short-lived STS tokens (see resolveAwsCredentials in container-runner.ts)
-// but still shouldn't be accessible to arbitrary shell commands.
-const SECRET_ENV_VARS = [
-  'ANTHROPIC_API_KEY',
-  'CLAUDE_CODE_OAUTH_TOKEN',
-  'AWS_ACCESS_KEY_ID',
-  'AWS_SECRET_ACCESS_KEY',
-  'AWS_SESSION_TOKEN',
-];
+const SECRET_ENV_VARS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'];
 
 function createProgressHook(): HookCallback {
   return async (input) => {
@@ -644,23 +636,11 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // Build SDK env: merge secrets into a copy of process.env for the SDK.
-  // AWS credentials must also be set on process.env because the AWS SDK
-  // (used by Claude Code for Bedrock) reads directly from process.env,
-  // not from the options.env passed to query(). The createSanitizeBashHook
-  // + SECRET_ENV_VARS strips these from Bash subprocesses so agent commands
-  // can't access them. This is safe inside the container — the only risk
-  // would be exfiltration via /proc/self/environ, which requires the agent
-  // to already be compromised.
+  // Build SDK env: merge secrets into process.env for the SDK only.
+  // Secrets never touch process.env itself, so Bash subprocesses can't see them.
   const sdkEnv: Record<string, string | undefined> = { ...process.env };
-  const AWS_CRED_KEYS = ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN'];
   for (const [key, value] of Object.entries(containerInput.secrets || {})) {
     sdkEnv[key] = value;
-    // AWS creds need to be on process.env for the AWS SDK (Bedrock auth).
-    // Other secrets stay off process.env — only sdkEnv carries them.
-    if (AWS_CRED_KEYS.includes(key)) {
-      process.env[key] = value;
-    }
   }
 
   const __dirname = path.dirname(fileURLToPath(import.meta.url));

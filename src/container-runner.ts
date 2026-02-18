@@ -223,17 +223,10 @@ function buildVolumeMounts(
     }, null, 2) + '\n');
   }
 
-  // Mount AWS credentials directory (if it exists) for Bedrock authentication.
-  // AWS_PROFILE is passed via readSecrets() env vars, but the SDK needs the
-  // actual ~/.aws/config and ~/.aws/credentials files to resolve the profile.
-  const awsDir = path.join(homeDir, '.aws');
-  if (fs.existsSync(awsDir)) {
-    mounts.push({
-      hostPath: awsDir,
-      containerPath: '/home/node/.aws',
-      readonly: true,
-    });
-  }
+  // ~/.aws is NOT mounted. Permanent IAM keys for multiple accounts live there
+  // and would be exposed to every container. Instead, readSecrets() resolves
+  // credentials to short-lived STS temp tokens passed via stdin.
+  // See resolveAwsCredentials() for the full rationale.
 
   // Mount .claude sessions directory
   mounts.push({
@@ -297,10 +290,73 @@ function buildVolumeMounts(
 }
 
 /**
+ * Resolve AWS credentials into short-lived STS temporary credentials.
+ *
+ * Why STS instead of mounting ~/.aws:
+ * - ~/.aws/credentials contains permanent IAM keys for MULTIPLE AWS accounts/profiles.
+ *   Mounting it into every container exposes all of them, not just the one NanoClaw needs.
+ * - STS temp creds expire in 3 hours. Even if exfiltrated, the blast radius is limited.
+ * - Temp creds are passed via stdin (never on disk inside the container).
+ *
+ * If the host already has temporary credentials (AWS_SESSION_TOKEN set), we pass
+ * those through directly — STS temp creds can't generate more temp creds.
+ *
+ * Duration: 10800s (3 hours) covers the 2-hour CONTAINER_MAX_RUNTIME with margin.
+ */
+function resolveAwsCredentials(): { accessKeyId: string; secretAccessKey: string; sessionToken: string } | null {
+  // If host already has explicit temporary credentials, pass them through
+  if (process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY && process.env.AWS_SESSION_TOKEN) {
+    return {
+      accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+      sessionToken: process.env.AWS_SESSION_TOKEN,
+    };
+  }
+
+  // Check if AWS CLI is available and credentials exist
+  const homeDir = getHomeDir();
+  const awsDir = path.join(homeDir, '.aws');
+  if (!fs.existsSync(awsDir)) return null;
+
+  const profile = process.env.AWS_PROFILE;
+  const profileFlag = profile ? `--profile ${profile}` : '';
+
+  // Try STS with one retry
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const output = execSync(
+        `aws sts get-session-token --duration-seconds 10800 ${profileFlag} --output json`,
+        { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 10000 },
+      );
+      const parsed = JSON.parse(output);
+      const creds = parsed.Credentials;
+      if (creds?.AccessKeyId && creds?.SecretAccessKey && creds?.SessionToken) {
+        logger.info('Resolved AWS credentials via STS (3-hour temp creds)');
+        return {
+          accessKeyId: creds.AccessKeyId,
+          secretAccessKey: creds.SecretAccessKey,
+          sessionToken: creds.SessionToken,
+        };
+      }
+    } catch (err) {
+      if (attempt === 0) {
+        logger.warn({ err }, 'STS get-session-token failed, retrying...');
+        // Brief delay before retry
+        execSync('sleep 0.5', { stdio: 'pipe' });
+      } else {
+        logger.error({ err }, 'STS get-session-token failed after retry — containers will not have AWS credentials');
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
  * Read allowed secrets from .env for passing to the container via stdin.
  * Secrets are never written to disk or mounted as files.
  *
- * Also includes AWS credentials from the environment (for Bedrock support).
+ * AWS credentials are resolved to short-lived STS tokens (see resolveAwsCredentials).
  */
 function readSecrets(): Record<string, string> {
   const secrets: Record<string, string> = {};
@@ -336,22 +392,20 @@ function readSecrets(): Record<string, string> {
     }
   }
 
-  // AWS Bedrock credentials from environment
-  // These are needed for AWS Bedrock authentication
-  const awsVars = [
-    'AWS_PROFILE',
-    'AWS_ACCESS_KEY_ID',
-    'AWS_SECRET_ACCESS_KEY',
-    'AWS_SESSION_TOKEN',
-    'AWS_REGION',
-    'AWS_DEFAULT_REGION',
-  ];
+  // AWS Bedrock credentials: resolve to short-lived STS temp creds.
+  // This avoids mounting ~/.aws (which exposes permanent keys for all profiles).
+  const stsCreds = resolveAwsCredentials();
+  if (stsCreds) {
+    secrets['AWS_ACCESS_KEY_ID'] = stsCreds.accessKeyId;
+    secrets['AWS_SECRET_ACCESS_KEY'] = stsCreds.secretAccessKey;
+    secrets['AWS_SESSION_TOKEN'] = stsCreds.sessionToken;
+    // AWS_PROFILE is not needed — explicit credentials take precedence in the SDK chain.
+  }
 
-  for (const key of awsVars) {
+  // Pass region config (not sensitive, but needed for Bedrock endpoint routing)
+  for (const key of ['AWS_REGION', 'AWS_DEFAULT_REGION']) {
     const value = process.env[key];
-    if (value) {
-      secrets[key] = value;
-    }
+    if (value) secrets[key] = value;
   }
 
   // Claude Code Bedrock configuration

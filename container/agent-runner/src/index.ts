@@ -198,8 +198,16 @@ function createPreCompactHook(): HookCallback {
 
 // Secrets to strip from Bash tool subprocess environments.
 // These are needed by claude-code for API auth but should never
-// be visible to commands Kit runs.
-const SECRET_ENV_VARS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'];
+// be visible to commands the agent runs via Bash tool.
+// AWS creds are short-lived STS tokens (see resolveAwsCredentials in container-runner.ts)
+// but still shouldn't be accessible to arbitrary shell commands.
+const SECRET_ENV_VARS = [
+  'ANTHROPIC_API_KEY',
+  'CLAUDE_CODE_OAUTH_TOKEN',
+  'AWS_ACCESS_KEY_ID',
+  'AWS_SECRET_ACCESS_KEY',
+  'AWS_SESSION_TOKEN',
+];
 
 function createProgressHook(): HookCallback {
   return async (input) => {

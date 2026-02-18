@@ -29,6 +29,18 @@ Single Node.js process that connects to WhatsApp, routes messages to Claude Agen
 | `/customize` | Adding channels, integrations, changing behavior |
 | `/debug` | Container issues, logs, troubleshooting |
 
+## Code Comments & Decision Context
+
+When making non-obvious decisions — especially security, performance, or architectural choices — add inline comments explaining **why**, not just what. Future sessions (including yours) will use these comments to understand constraints and avoid reverting intentional decisions.
+
+Examples of what to document:
+- Why a credential path was chosen over alternatives (e.g. STS temp creds vs mounting `~/.aws`)
+- Why a guard clause or validation exists (the attack it prevents)
+- Why something that looks redundant is actually necessary (e.g. both env vars AND file mounts for auth)
+- Performance tradeoffs (e.g. "fs.watch + fallback poll because fs.watch alone misses events on some filesystems")
+
+Don't over-comment obvious code. Focus on decisions that would confuse a future reader or that you'd otherwise need to re-research.
+
 ## Development
 
 Run commands directly—don't tell the user to run them.

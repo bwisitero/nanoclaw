@@ -298,6 +298,11 @@ function buildVolumeMounts(
  * - STS temp creds expire in 3 hours. Even if exfiltrated, the blast radius is limited.
  * - Temp creds are passed via stdin (never on disk inside the container).
  *
+ * PROVIDER NOTE: This is Bedrock-specific. If switching to OpenRouter or direct
+ * Anthropic API, this function becomes unnecessary — those providers use API keys
+ * (ANTHROPIC_API_KEY / OPENROUTER_API_KEY) which already flow through readSecrets()
+ * via .env. Remove the STS call and the ~/.aws comment in buildVolumeMounts() at that point.
+ *
  * If the host already has temporary credentials (AWS_SESSION_TOKEN set), we pass
  * those through directly — STS temp creds can't generate more temp creds.
  *

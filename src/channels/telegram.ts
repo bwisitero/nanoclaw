@@ -32,6 +32,8 @@ export class TelegramChannel implements Channel {
   private botToken: string;
   private connected = false; // Tracks actual polling state, not just bot object existence
   private reconnecting = false;
+  private lastActivity = 0; // Timestamp of last message sent or received
+  private livenessInterval: ReturnType<typeof setInterval> | null = null;
 
   constructor(botToken: string, opts: TelegramChannelOpts) {
     this.botToken = botToken;
@@ -133,6 +135,14 @@ export class TelegramChannel implements Channel {
 
   async connect(): Promise<void> {
     this.bot = new Bot(this.botToken);
+
+    // Track all inbound activity for liveness detection.
+    // If no activity is seen for an extended period, the liveness probe
+    // will catch it even if the `connected` flag is stale.
+    this.bot.use(async (ctx, next) => {
+      this.lastActivity = Date.now();
+      await next();
+    });
 
     // Command to get chat ID (useful for registration)
     this.bot.command('chatid', (ctx) => {
@@ -582,6 +592,8 @@ export class TelegramChannel implements Channel {
       this.bot!.start({
         onStart: (botInfo) => {
           this.connected = true;
+          this.lastActivity = Date.now();
+          this.startLivenessProbe();
           logger.info(
             { username: botInfo.username, id: botInfo.id },
             'Telegram bot connected',
@@ -642,6 +654,7 @@ export class TelegramChannel implements Channel {
           lastMessageId = await sendChunk(text.slice(i, i + MAX_LENGTH));
         }
       }
+      this.lastActivity = Date.now();
       logger.info({ jid, length: text.length }, 'Telegram message sent');
       return lastMessageId;
     } catch (err) {
@@ -748,10 +761,42 @@ export class TelegramChannel implements Channel {
 
   async disconnect(): Promise<void> {
     this.connected = false; // Set before stop so the polling-end handler doesn't trigger reconnect
+    this.stopLivenessProbe();
     if (this.bot) {
       this.bot.stop();
       this.bot = null;
       logger.info('Telegram bot stopped');
+    }
+  }
+
+  /**
+   * Liveness probe: every 2 minutes, call getMe() to verify the bot can
+   * reach the Telegram API. If it fails, mark as disconnected and trigger
+   * reconnect. This catches cases where polling dies silently without
+   * the bot.start() promise resolving (e.g. network partition).
+   *
+   * Why this exists: On 2026-02-23, a DNS failure killed polling silently.
+   * isConnected() returned true for 4+ hours because the bot object still
+   * existed. This probe would have caught it within 2 minutes.
+   */
+  private startLivenessProbe(): void {
+    this.stopLivenessProbe();
+    this.livenessInterval = setInterval(async () => {
+      if (!this.bot || !this.connected) return;
+      try {
+        await this.bot.api.getMe();
+      } catch (err) {
+        logger.warn({ err }, 'Telegram liveness probe failed — marking disconnected');
+        this.connected = false;
+        this.scheduleReconnect();
+      }
+    }, 2 * 60 * 1000); // Every 2 minutes
+  }
+
+  private stopLivenessProbe(): void {
+    if (this.livenessInterval) {
+      clearInterval(this.livenessInterval);
+      this.livenessInterval = null;
     }
   }
 
@@ -763,6 +808,7 @@ export class TelegramChannel implements Channel {
   private scheduleReconnect(): void {
     if (this.reconnecting) return;
     this.reconnecting = true;
+    this.stopLivenessProbe();
     this.reconnectAttempts++;
     const delay = Math.min(5000 * Math.pow(2, this.reconnectAttempts - 1), 60000);
     logger.info({ attempt: this.reconnectAttempts, delayMs: delay }, 'Scheduling Telegram reconnect');

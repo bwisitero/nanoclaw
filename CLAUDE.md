@@ -10,14 +10,18 @@ Single Node.js process that connects to WhatsApp, routes messages to Claude Agen
 
 | File | Purpose |
 |------|---------|
-| `src/index.ts` | Orchestrator: state, message loop, agent invocation |
-| `src/channels/whatsapp.ts` | WhatsApp connection, auth, send/receive |
-| `src/ipc.ts` | IPC watcher and task processing |
+| `src/index.ts` | Orchestrator: state, message loop, agent invocation, health check |
+| `src/channels/whatsapp.ts` | WhatsApp connection, auth, send/receive, reconnect |
+| `src/channels/telegram.ts` | Telegram bot, liveness probe, auto-reconnect |
+| `src/ipc.ts` | IPC watcher (fs.watch) and task processing |
 | `src/router.ts` | Message formatting and outbound routing |
 | `src/config.ts` | Trigger pattern, paths, intervals |
-| `src/container-runner.ts` | Spawns agent containers with mounts |
-| `src/task-scheduler.ts` | Runs scheduled tasks |
-| `src/db.ts` | SQLite operations |
+| `src/container-runner.ts` | Spawns agent containers with mounts and progress streaming |
+| `src/task-scheduler.ts` | Scheduled tasks with quiet hours |
+| `src/db.ts` | SQLite operations (messages, groups, sessions, costs, document search) |
+| `src/document-processor.ts` | PDF/CSV/image extraction, chunking, embedding |
+| `src/embedding-client.ts` | Local ONNX embedding service client |
+| `src/mount-security.ts` | Mount allowlist validation with symlink detection |
 | `groups/{name}/CLAUDE.md` | Per-group memory (isolated) |
 | `container/skills/agent-browser.md` | Browser automation tool (available to all agents via Bash) |
 

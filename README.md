@@ -48,14 +48,19 @@ Then run `/setup`. Claude Code handles everything: dependencies, authentication,
 
 ## What It Supports
 
-- **WhatsApp I/O** - Message Claude from your phone
+- **WhatsApp + Telegram** - Message Claude from your phone or desktop. Telegram support via `/add-telegram` skill
 - **Isolated group context** - Each group has its own `CLAUDE.md` memory, isolated filesystem, and runs in its own container sandbox with only that filesystem mounted
 - **Main channel** - Your private channel (self-chat) for admin control; every other group is completely isolated
-- **Scheduled tasks** - Recurring jobs that run Claude and can message you back
-- **Web access** - Search and fetch content
-- **Container isolation** - Agents sandboxed in Apple Container (macOS) or Docker (macOS/Linux)
+- **Scheduled tasks with quiet hours** - Recurring jobs with cron/interval scheduling. Quiet hours suppress tasks during sleep (e.g. 22:00-07:00)
+- **Document & conversation search** - Upload PDFs, CSVs, images. Full-text keyword search (FTS5) and semantic search with local embeddings (all-MiniLM-L6-v2, no external API)
+- **Web access** - Search (Tavily) and fetch content
+- **Live progress indicators** - See what the agent is doing in real-time (tool names shown as the agent works)
+- **Cost tracking** - Per-interaction token usage and USD cost displayed after each response. Historical cost data per group
+- **Container isolation** - Agents sandboxed in Apple Container (macOS) or Docker (macOS/Linux). Pre-compiled TypeScript for fast container startup
 - **Agent Swarms** - Spin up teams of specialized agents that collaborate on complex tasks (first personal AI assistant to support this)
-- **Optional integrations** - Add Gmail (`/add-gmail`) and more via skills
+- **Self-healing** - Auto-reconnect on channel disconnection with exponential backoff. Liveness probes detect silent failures. Health check monitors channels, database, and container health every 5 minutes. Main agent can edit source code and trigger auto-restart via launchd WatchPaths
+- **Security hardening** - Path traversal protection on IPC file operations, cross-group request validation, mount symlink detection, cryptographic task IDs
+- **Optional integrations** - Add Gmail (`/add-gmail`), Telegram (`/add-telegram`), voice transcription (`/add-voice-transcription`), and more via skills
 
 ## Usage
 
@@ -100,15 +105,20 @@ Users then run `/add-telegram` on their fork and get clean code that does exactl
 Skills we'd love to see:
 
 **Communication Channels**
-- `/add-telegram` - Add Telegram as channel. Should give the user option to replace WhatsApp or add as additional channel. Also should be possible to add it as a control channel (where it can trigger actions) or just a channel that can be used in actions triggered elsewhere
 - `/add-slack` - Add Slack
 - `/add-discord` - Add Discord
+- `/add-signal` - Add Signal
 
 **Platform Support**
 - `/setup-windows` - Windows via WSL2 + Docker
 
 **Session Management**
 - `/add-clear` - Add a `/clear` command that compacts the conversation (summarizes context while preserving critical information in the same session). Requires figuring out how to trigger compaction programmatically via the Claude Agent SDK.
+
+**Already Implemented** (available as skills):
+- `/add-telegram` - Telegram as additional or replacement channel with agent swarm support
+- `/add-gmail` - Gmail integration with per-user OAuth isolation
+- `/add-voice-transcription` - Whisper-based voice message transcription
 
 ## Requirements
 
@@ -120,20 +130,28 @@ Skills we'd love to see:
 ## Architecture
 
 ```
-WhatsApp (baileys) --> SQLite --> Polling loop --> Container (Claude Agent SDK) --> Response
+Channels (WhatsApp/Telegram) --> SQLite --> Message loop --> Container (Claude Agent SDK) --> Response
+                                              |                    |
+                                         Health check         IPC (fs.watch)
+                                         Task scheduler       MCP tools
+                                         Document indexer     Progress streaming
 ```
 
-Single Node.js process. Agents execute in isolated Linux containers with mounted directories. Per-group message queue with concurrency control. IPC via filesystem.
+Single Node.js process. Agents execute in isolated Linux containers with mounted directories. Per-group message queue with concurrency control. IPC via filesystem with `fs.watch` for low-latency detection.
 
 Key files:
-- `src/index.ts` - Orchestrator: state, message loop, agent invocation
-- `src/channels/whatsapp.ts` - WhatsApp connection, auth, send/receive
-- `src/ipc.ts` - IPC watcher and task processing
+- `src/index.ts` - Orchestrator: state, message loop, agent invocation, health check
+- `src/channels/whatsapp.ts` - WhatsApp connection, auth, send/receive, reconnect
+- `src/channels/telegram.ts` - Telegram bot, liveness probe, auto-reconnect
+- `src/ipc.ts` - IPC watcher (fs.watch + fallback poll) and task processing
 - `src/router.ts` - Message formatting and outbound routing
 - `src/group-queue.ts` - Per-group queue with global concurrency limit
-- `src/container-runner.ts` - Spawns streaming agent containers
-- `src/task-scheduler.ts` - Runs scheduled tasks
-- `src/db.ts` - SQLite operations (messages, groups, sessions, state)
+- `src/container-runner.ts` - Spawns streaming agent containers with progress markers
+- `src/task-scheduler.ts` - Scheduled tasks with quiet hours support
+- `src/db.ts` - SQLite operations (messages, groups, sessions, state, costs, document search)
+- `src/document-processor.ts` - PDF/CSV/image extraction, chunking, embedding
+- `src/embedding-client.ts` - Local ONNX embedding service (all-MiniLM-L6-v2)
+- `src/mount-security.ts` - Mount allowlist validation with symlink detection
 - `groups/*/CLAUDE.md` - Per-group memory
 
 ## FAQ

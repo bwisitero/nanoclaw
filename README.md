@@ -14,7 +14,34 @@
 
 **New:** First AI assistant to support [Agent Swarms](https://code.claude.com/docs/en/agent-teams). Spin up teams of agents that collaborate in your chat.
 
-## Why I Built This
+## About This Fork
+
+This is a production-hardened fork of [NanoClaw](https://github.com/gavrielc/nanoclaw) with 32 commits adding reliability, search, cost tracking, and self-healing on top of the original's clean foundation.
+
+**If you want a minimal starting point** — use [upstream NanoClaw](https://github.com/gavrielc/nanoclaw). WhatsApp, containers, scheduled tasks. Intentionally small.
+
+**If you want something closer to daily-driver ready** — this fork adds the features you'll want after running the base for a week: Telegram, document search, progress indicators, quiet hours, auto-reconnect, health monitoring, cost visibility, and security hardening.
+
+### What This Fork Adds Over Upstream NanoClaw
+
+| Category | Upstream NanoClaw | This Fork |
+|----------|------------------|-----------|
+| **Channels** | WhatsApp only | WhatsApp + Telegram (with agent swarm bot pool) |
+| **Search** | None | Full-text (FTS5) + semantic search with local embeddings |
+| **Documents** | None | PDF/CSV/image upload, extraction, chunking, indexing |
+| **Progress** | Silent until done | Live tool-by-tool progress indicators |
+| **Cost** | None | Per-interaction token/USD tracking with history |
+| **Scheduling** | Basic cron/interval | + Quiet hours (suppress during sleep) |
+| **Reliability** | Manual restart on failure | Auto-reconnect, liveness probes, health check every 5 min |
+| **Self-healing** | None | Agent can edit source + `npm run build` → launchd auto-restarts |
+| **Security** | Container isolation | + Path traversal guards, cross-group validation, symlink detection, cryptographic task IDs |
+| **Performance** | TSC on every container start | Pre-compiled TypeScript, fs.watch IPC, skills mounted not copied |
+| **Integrations** | Skills only | Gmail, voice transcription, Google Workspace MCP built-in |
+| **Container startup** | ~2s (recompiles TypeScript) | ~1s (pre-built, recompiles only if source is newer) |
+
+Everything from upstream works here. The fork stays mergeable — features are additive, not rewrites.
+
+## Why NanoClaw
 
 [OpenClaw](https://github.com/openclaw/openclaw) is an impressive project with a great vision. But I can't sleep well running software I don't understand with access to my life. OpenClaw has 52+ modules, 8 config management files, 45+ dependencies, and abstractions for 15 channel providers. Security is application-level (allowlists, pairing codes) rather than OS isolation. Everything runs in one Node process with shared memory.
 
@@ -23,7 +50,7 @@ NanoClaw gives you the same core functionality in a codebase you can understand 
 ## Quick Start
 
 ```bash
-git clone https://github.com/gavrielc/nanoclaw.git
+git clone https://github.com/bwisitero/nanoclaw.git
 cd nanoclaw
 claude
 ```
@@ -158,7 +185,7 @@ Key files:
 
 **Why WhatsApp and not Telegram/Signal/etc?**
 
-Because I use WhatsApp. Fork it and run a skill to change it. That's the whole point.
+Both WhatsApp and Telegram are supported out of the box. Run `/add-telegram` to add Telegram, or set `TELEGRAM_ONLY=true` to skip WhatsApp entirely. Want Signal or Slack? Fork it and run a skill to add them.
 
 **Why Apple Container instead of Docker?**
 

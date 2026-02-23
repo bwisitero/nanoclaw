@@ -837,10 +837,14 @@ async function main(): Promise<void> {
   const healthCheck = () => {
     const issues: string[] = [];
 
-    // 1. Check channel connectivity
+    // 1. Check channel connectivity — attempt reconnect for disconnected channels
     for (const ch of channels) {
       if (!ch.isConnected()) {
         issues.push(`${ch.name} disconnected`);
+        // Attempt reconnect — channels handle their own backoff/retry logic
+        ch.connect().catch((err) => {
+          logger.warn({ channel: ch.name, err }, 'Health check reconnect attempt failed');
+        });
       }
     }
 

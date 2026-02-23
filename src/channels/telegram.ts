@@ -30,6 +30,8 @@ export class TelegramChannel implements Channel {
   private bot: Bot | null = null;
   private opts: TelegramChannelOpts;
   private botToken: string;
+  private connected = false; // Tracks actual polling state, not just bot object existence
+  private reconnecting = false;
 
   constructor(botToken: string, opts: TelegramChannelOpts) {
     this.botToken = botToken;
@@ -567,15 +569,19 @@ export class TelegramChannel implements Channel {
       });
     });
 
-    // Handle errors gracefully
+    // Handle errors gracefully — log and attempt reconnect if polling dies
     this.bot.catch((err) => {
       logger.error({ err: err.message }, 'Telegram bot error');
     });
 
-    // Start polling — returns a Promise that resolves when started
+    // Start polling — returns a Promise that resolves when started.
+    // grammy's bot.start() returns a promise that resolves when polling
+    // begins, but the polling itself runs in the background. If it dies
+    // (network outage, API error), we detect it and reconnect.
     return new Promise<void>((resolve) => {
       this.bot!.start({
         onStart: (botInfo) => {
+          this.connected = true;
           logger.info(
             { username: botInfo.username, id: botInfo.id },
             'Telegram bot connected',
@@ -586,6 +592,18 @@ export class TelegramChannel implements Channel {
           );
           resolve();
         },
+      }).then(() => {
+        // bot.start() promise resolves when polling STOPS (normally via bot.stop())
+        // If we didn't disconnect intentionally, this means polling died — reconnect.
+        if (this.connected && !this.reconnecting) {
+          logger.warn('Telegram polling stopped unexpectedly, reconnecting...');
+          this.connected = false;
+          this.scheduleReconnect();
+        }
+      }).catch((err) => {
+        logger.error({ err }, 'Telegram polling crashed');
+        this.connected = false;
+        this.scheduleReconnect();
       });
     });
   }
@@ -721,7 +739,7 @@ export class TelegramChannel implements Channel {
   }
 
   isConnected(): boolean {
-    return this.bot !== null;
+    return this.connected;
   }
 
   ownsJid(jid: string): boolean {
@@ -729,11 +747,44 @@ export class TelegramChannel implements Channel {
   }
 
   async disconnect(): Promise<void> {
+    this.connected = false; // Set before stop so the polling-end handler doesn't trigger reconnect
     if (this.bot) {
       this.bot.stop();
       this.bot = null;
       logger.info('Telegram bot stopped');
     }
+  }
+
+  /**
+   * Reconnect after polling dies. Exponential backoff: 5s, 10s, 20s, 40s, max 60s.
+   * Recreates the bot instance and re-registers all handlers via connect().
+   */
+  private reconnectAttempts = 0;
+  private scheduleReconnect(): void {
+    if (this.reconnecting) return;
+    this.reconnecting = true;
+    this.reconnectAttempts++;
+    const delay = Math.min(5000 * Math.pow(2, this.reconnectAttempts - 1), 60000);
+    logger.info({ attempt: this.reconnectAttempts, delayMs: delay }, 'Scheduling Telegram reconnect');
+
+    setTimeout(async () => {
+      try {
+        // Clean up old bot instance
+        if (this.bot) {
+          try { this.bot.stop(); } catch { /* ignore */ }
+          this.bot = null;
+        }
+        this.reconnecting = false;
+        await this.connect();
+        this.reconnectAttempts = 0; // Reset on success
+        logger.info('Telegram reconnected successfully');
+      } catch (err) {
+        logger.error({ err, attempt: this.reconnectAttempts }, 'Telegram reconnect failed');
+        this.reconnecting = false;
+        // Try again
+        this.scheduleReconnect();
+      }
+    }, delay);
   }
 
   async setTyping(jid: string, isTyping: boolean): Promise<void> {

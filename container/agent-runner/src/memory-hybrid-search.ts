@@ -170,6 +170,11 @@ async function searchWithFTS5(query: string, groupFolder: string, chatJid: strin
       LIMIT ?
     `).all(escapedQuery, chatJid, Math.floor(limit / 2));
 
+    db.close();
+
+    // Search memory files (facts.md, conversation summaries, etc.)
+    const memoryResults = searchMemoryFiles(query, folderName, Math.floor(limit / 3));
+
     return [
       ...docResults.map((r: any) => ({
         source: 'documents' as const,
@@ -186,9 +191,90 @@ async function searchWithFTS5(query: string, groupFolder: string, chatJid: strin
         timestamp: new Date(r.timestamp).getTime(),
         relevanceScore: Math.abs(r.relevanceScore),
       })),
+      ...memoryResults,
     ];
-  } finally {
-    db.close();
+  } catch (error) {
+    throw error;
+  }
+}
+
+/**
+ * Search memory files (facts.md, conversation summaries, etc.)
+ * Uses simple text matching since these are curated, important files.
+ */
+function searchMemoryFiles(query: string, groupFolder: string, limit: number): SearchResult[] {
+  // Try container path first, fall back to host path for testing
+  let memoryPath = `/workspace/group/memory`;
+  if (!fs.existsSync(memoryPath)) {
+    // Running outside container - construct path from group folder
+    const basePath = process.cwd();
+    memoryPath = path.join(basePath, 'groups', groupFolder, 'memory');
+  }
+
+  if (!fs.existsSync(memoryPath)) {
+    return []; // No memory directory yet
+  }
+
+  const results: SearchResult[] = [];
+  const queryLower = query.toLowerCase();
+  const queryTokens = tokenize(query);
+
+  try {
+    const files = fs.readdirSync(memoryPath).filter(f => f.endsWith('.md'));
+
+    for (const file of files) {
+      const filePath = path.join(memoryPath, file);
+      const content = fs.readFileSync(filePath, 'utf8');
+      const contentLower = content.toLowerCase();
+
+      // Check if query matches
+      if (!contentLower.includes(queryLower) && !queryTokens.some(token => contentLower.includes(token))) {
+        continue;
+      }
+
+      // Find best matching snippet (context around match)
+      const lines = content.split('\n');
+      let bestMatch = '';
+      let bestScore = 0;
+
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        const lineLower = line.toLowerCase();
+
+        // Score based on query token matches
+        const matchCount = queryTokens.filter(token => lineLower.includes(token)).length;
+        if (matchCount > bestScore) {
+          bestScore = matchCount;
+          // Get context: current line + 1 line before/after
+          const contextLines = lines.slice(Math.max(0, i - 1), Math.min(lines.length, i + 2));
+          bestMatch = contextLines.join(' ').slice(0, 200);
+        }
+      }
+
+      if (bestScore > 0) {
+        // Relevance score: higher if more tokens match, boost for facts.md
+        let relevanceScore = bestScore * 2; // Base score from token matches
+        if (file === 'facts.md') {
+          relevanceScore *= 1.5; // Boost facts.md (curated important info)
+        }
+
+        results.push({
+          source: 'facts' as const,
+          content: content.slice(0, 1000), // First 1000 chars
+          snippet: bestMatch,
+          timestamp: fs.statSync(filePath).mtimeMs,
+          relevanceScore,
+          path: `memory/${file}`,
+        });
+      }
+
+      if (results.length >= limit) break;
+    }
+
+    return results.sort((a, b) => b.relevanceScore - a.relevanceScore);
+  } catch (error) {
+    console.error('[Memory] Error searching memory files:', error);
+    return [];
   }
 }
 

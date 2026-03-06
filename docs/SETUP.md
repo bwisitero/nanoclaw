@@ -306,13 +306,60 @@ npm run build
 npm run dev
 ```
 
+## What Works Out of the Box
+
+Your NanoClaw installation includes these features automatically:
+
+### 🧠 Smart Memory Injection (NEW!)
+**It just works.** The agent automatically remembers past conversations without you asking.
+
+Try this:
+1. Say: `@Andy remember my favorite color is blue`
+2. Wait 1 minute (to clear context)
+3. Ask: `@Andy what's my favorite color?`
+
+The agent will recall it automatically! No need to call `search_memory` manually.
+
+**How it works:**
+- Searches 3 sources: documents you upload, past messages, memory files
+- Only injects when relevant (saves ~65% tokens vs always injecting)
+- Configurable: `configure_memory(action='get')` to see settings
+
+### 🔍 Document Search
+Upload PDFs, CSVs, or images - they're automatically indexed and searchable.
+
+Send a PDF to your chat, then ask:
+```
+@Andy what did that document say about taxes?
+```
+
+**Search modes:**
+- Keyword search (fast, exact matches)
+- Semantic search (understands meaning, finds related content)
+- Hybrid (combines both for best results)
+
+### 📝 Memory Tools
+- `remember("fact")` - Save important information
+- `search_memory("query")` - Search past conversations
+- Memory files in `groups/main/memory/` for structured notes
+
+### 📅 Scheduled Tasks
+```
+@Andy remind me to check email every weekday at 9am
+@Andy every Monday, summarize last week's tasks
+```
+
+### 🌐 Web Search
+Real-time web search via Tavily (1000 searches/month free).
+
 ## Next Steps
 
-- Customize your assistant in `groups/main/CLAUDE.md`
-- Add scheduled tasks: `@Andy remind me to...`
-- Upload documents for search: Just send PDFs/CSVs/images to your chat
-- Create custom skills: `@Andy create a skill that...`
-- Join group chats and register them: `@Andy join this group`
+- **Customize your assistant** in `groups/main/CLAUDE.md`
+- **Test memory injection**: Ask about past conversations
+- **Upload documents**: Send PDFs/CSVs and ask questions about them
+- **Create custom skills**: `@Andy create a skill that...`
+- **Join group chats**: `@Andy join this group`
+- **Add optional features**: Telegram, voice transcription, etc.
 
 ## Need Help?
 

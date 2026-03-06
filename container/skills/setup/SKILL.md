@@ -159,14 +159,26 @@ Congratulate them and provide next steps:
 nano /workspace/project/groups/main/CLAUDE.md
 ```
 
-**Available features:**
-- Upload documents (PDFs, CSVs, images) for search
-- Schedule tasks: "@Andy remind me to..."
+**Built-in features (already working!):**
+- ✨ **Smart memory injection** - The agent automatically remembers past conversations without you asking
+  - Cross-session recall (ask "what did we discuss last week?")
+  - Searches 3 sources: documents, messages, memory files
+  - Token-efficient: only injects when relevant
+- 🔍 **Document search** - Upload PDFs/CSVs/images and they're automatically searchable
+  - Keyword search (FTS5) + semantic search (local embeddings)
+  - Ask: "what did my tax documents say about..."
+- 📝 **Memory tools** - `remember("fact")` and `search_memory("query")`
+- 📅 **Scheduled tasks** - "@Andy remind me to... every Monday"
+- 🌐 **Web search** - Tavily integration for real-time info
+
+**Optional add-ons:**
 - Add Telegram: "@Andy add Telegram support"
 - Add voice transcription: "@Andy add voice transcription"
+- Configure memory behavior: `configure_memory(action='get')`
 
 **Resources:**
 - Full setup guide: `/workspace/project/docs/SETUP.md`
+- Memory features explained: `/workspace/project/groups/main/CLAUDE.md#memory`
 - Architecture: `/workspace/project/README.md`
 - Need help? Just ask: "@Andy how do I..."
 

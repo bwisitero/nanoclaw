@@ -27,8 +27,9 @@ This is a production-hardened fork of [NanoClaw](https://github.com/gavrielc/nan
 | Category | Upstream NanoClaw | This Fork |
 |----------|------------------|-----------|
 | **Channels** | WhatsApp only | WhatsApp + Telegram (with agent swarm bot pool) |
-| **Search** | None | Full-text (FTS5) + semantic search with local embeddings |
-| **Documents** | None | PDF/CSV/image upload, extraction, chunking, indexing |
+| **Memory** | Manual tools only | **Smart automatic injection** - Cross-session recall without asking |
+| **Search** | None | Hybrid search (FTS5 + semantic) with 3 sources (docs, messages, memory) |
+| **Documents** | None | PDF/CSV/image upload → auto-indexed → searchable |
 | **Progress** | Silent until done | Live tool-by-tool progress indicators |
 | **Cost** | None | Per-interaction token/USD tracking with history |
 | **Scheduling** | Basic cron/interval | + Quiet hours (suppress during sleep) |

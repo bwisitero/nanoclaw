@@ -49,13 +49,30 @@ NanoClaw gives you the same core functionality in a codebase you can understand 
 
 ## Quick Start
 
+### Option 1: Guided Setup (Recommended)
+
 ```bash
-git clone https://github.com/bwisitero/nanoclaw.git
+git clone https://github.com/YOUR_USERNAME/nanoclaw.git
 cd nanoclaw
-claude
+npm install
+npm run build
 ```
 
-Then run `/setup`. Claude Code handles everything: dependencies, authentication, container setup, service configuration.
+Then message yourself on WhatsApp and say:
+```
+@Andy /setup
+```
+
+The interactive setup wizard will guide you through everything.
+
+### Option 2: Manual Setup
+
+See the complete step-by-step guide: **[docs/SETUP.md](docs/SETUP.md)**
+
+**What you'll need:**
+- Anthropic API key (get from [console.anthropic.com](https://console.anthropic.com))
+- Tavily API key for web search (get from [tavily.com](https://tavily.com))
+- 5-10 minutes to complete setup
 
 ## Philosophy
 

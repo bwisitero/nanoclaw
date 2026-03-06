@@ -11,7 +11,7 @@ import fs from 'fs';
 import path from 'path';
 import { CronExpressionParser } from 'cron-parser';
 import Database from 'better-sqlite3';
-import { loadMemoryConfig, DEFAULT_MEMORY_CONFIG, type MemoryConfig } from '../../../src/memory-config.js';
+import { loadMemoryConfig, DEFAULT_MEMORY_CONFIG, type MemoryConfig } from './memory-config.js';
 
 const IPC_DIR = '/workspace/ipc';
 const MESSAGES_DIR = path.join(IPC_DIR, 'messages');

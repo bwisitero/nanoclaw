@@ -13,7 +13,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import Database from 'better-sqlite3';
-import { loadMemoryConfig } from '../../../src/memory-config.js';
+import { loadMemoryConfig } from './memory-config.js';
 
 export interface SearchResult {
   source: 'facts' | 'conversations' | 'documents';

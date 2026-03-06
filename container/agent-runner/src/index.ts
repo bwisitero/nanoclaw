@@ -18,7 +18,7 @@ import fs from 'fs';
 import path from 'path';
 import { query, HookCallback, PreCompactHookInput, PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
 import { fileURLToPath } from 'url';
-import { loadMemoryConfig } from '../../../src/memory-config.js';
+import { loadMemoryConfig } from './memory-config.js';
 import { classifyQuery, shouldInjectMemory } from './query-classifier.js';
 import { hybridMemorySearch, formatMemoryContext, estimateTokens } from './memory-hybrid-search.js';
 

@@ -5,7 +5,7 @@
  */
 
 import { hybridMemorySearch, formatMemoryContext, estimateTokens } from './memory-hybrid-search.js';
-import { loadMemoryConfig } from '../../../src/memory-config.js';
+import { loadMemoryConfig } from './memory-config.js';
 import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';

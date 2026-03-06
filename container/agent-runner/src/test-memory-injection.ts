@@ -4,7 +4,7 @@
  * Validates query classification and injection behavior.
  */
 
-import { classifyQuery, shouldInjectMemory } from '../container/agent-runner/src/query-classifier.js';
+import { classifyQuery, shouldInjectMemory } from './query-classifier.js';
 
 interface TestCase {
   query: string;

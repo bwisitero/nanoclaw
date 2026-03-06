@@ -11,6 +11,7 @@ import fs from 'fs';
 import path from 'path';
 import { CronExpressionParser } from 'cron-parser';
 import Database from 'better-sqlite3';
+import { loadMemoryConfig, DEFAULT_MEMORY_CONFIG, type MemoryConfig } from '../../../src/memory-config.js';
 
 const IPC_DIR = '/workspace/ipc';
 const MESSAGES_DIR = path.join(IPC_DIR, 'messages');
@@ -546,6 +547,79 @@ server.tool(
           text: `Error reading cost data: ${err}`
         }],
         isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  'configure_memory',
+  'View or update memory system configuration for this group. Use this when user requests memory behavior changes or you need to check current settings. Configuration affects: injection mode (automatic/smart/manual), search weights, temporal decay, and diversity filtering.',
+  {
+    action: z.enum(['get', 'set']).describe('Action to perform: "get" to view current config, "set" to update config'),
+    config: z.object({
+      injection: z.object({
+        mode: z.enum(['automatic', 'smart', 'manual']).optional().describe('Memory injection mode: automatic (always inject), smart (classify queries first), manual (tools only)'),
+        maxTokens: z.number().optional().describe('Maximum tokens for injected memory context (default: 500)'),
+        maxResults: z.number().optional().describe('Maximum number of search results to inject (default: 10)'),
+        relevanceThreshold: z.number().optional().describe('Minimum relevance score (0-1) for including results (default: 0.3)'),
+      }).optional(),
+      hybridSearch: z.object({
+        vectorWeight: z.number().optional().describe('Weight for semantic similarity (0-1, default: 0.6)'),
+        keywordWeight: z.number().optional().describe('Weight for keyword matching (0-1, default: 0.4)'),
+        temporalDecay: z.boolean().optional().describe('Apply time-based decay to older memories (default: true)'),
+        halfLifeDays: z.number().optional().describe('Days for memory relevance to decay by 50% (default: 30)'),
+        mmrReranking: z.boolean().optional().describe('Apply MMR diversity filtering (default: true)'),
+        mmrLambda: z.number().optional().describe('MMR balance between relevance and diversity (0-1, default: 0.7)'),
+      }).optional(),
+      evergreen: z.array(z.string()).optional().describe('Files exempt from temporal decay (default: ["CLAUDE.md", "memory/facts.md"])'),
+    }).optional().describe('Configuration object (required for "set" action)'),
+  },
+  async (args) => {
+    const groupPath = '/workspace/group';
+    const configPath = path.join(groupPath, 'memory-config.json');
+
+    if (args.action === 'get') {
+      // Load current config (merges with defaults)
+      const currentConfig = loadMemoryConfig(groupPath);
+
+      return {
+        content: [{
+          type: 'text' as const,
+          text: `**Current Memory Configuration:**\n\n\`\`\`json\n${JSON.stringify(currentConfig, null, 2)}\n\`\`\`\n\n**Location:** \`${configPath}\`\n\n${fs.existsSync(configPath) ? '(Using custom config)' : '(Using defaults - no custom config file exists)'}`
+        }]
+      };
+    } else {
+      // Set action - validate and write config
+      if (!args.config) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: 'Error: config parameter is required for "set" action'
+          }],
+          isError: true,
+        };
+      }
+
+      // Load current config and merge with new values
+      const currentConfig = fs.existsSync(configPath)
+        ? JSON.parse(fs.readFileSync(configPath, 'utf8'))
+        : {};
+
+      const updatedConfig = {
+        injection: { ...currentConfig.injection, ...args.config.injection },
+        hybridSearch: { ...currentConfig.hybridSearch, ...args.config.hybridSearch },
+        evergreen: args.config.evergreen ?? currentConfig.evergreen,
+      };
+
+      // Write updated config
+      fs.writeFileSync(configPath, JSON.stringify(updatedConfig, null, 2));
+
+      return {
+        content: [{
+          type: 'text' as const,
+          text: `✅ Memory configuration updated successfully.\n\n**New configuration:**\n\`\`\`json\n${JSON.stringify(updatedConfig, null, 2)}\n\`\`\`\n\nChanges will take effect on the next query.`
+        }]
       };
     }
   },

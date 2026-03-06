@@ -88,6 +88,44 @@ You have a persistent memory system to recall past conversations and important f
   - Use when user says "remember this" or you learn something important
   - Example: `remember("Prefers Docker over Apple Container", "preferences")`
 
+- **`configure_memory(action, config?)`** - View or update memory system configuration
+  - Use `action='get'` to see current settings
+  - Use `action='set'` to update settings
+  - Example: `configure_memory(action='get')`
+
+### Memory Configuration
+
+This group's memory system can be configured to control automatic memory injection:
+
+**Injection Modes:**
+- **smart** (default): Classifies queries and injects memory only when relevant (recall/general questions)
+- **automatic**: Always injects memory context for every query
+- **manual**: Only uses memory when tools are explicitly called
+
+**Key Settings:**
+- `injection.mode`: Controls when memory is injected ('automatic' | 'smart' | 'manual')
+- `injection.maxTokens`: Max tokens for injected context (default: 500)
+- `injection.maxResults`: Max number of search results (default: 10)
+- `hybridSearch.vectorWeight`: Semantic relevance weight (default: 0.6)
+- `hybridSearch.keywordWeight`: Keyword matching weight (default: 0.4)
+- `hybridSearch.temporalDecay`: Favor recent memories (default: true)
+- `hybridSearch.mmrReranking`: Apply diversity filtering (default: true)
+
+**Examples:**
+```
+# View current configuration
+configure_memory(action='get')
+
+# Switch to automatic mode (always inject)
+configure_memory(action='set', config={injection: {mode: 'automatic'}})
+
+# Increase memory context size
+configure_memory(action='set', config={injection: {maxTokens: 1000}})
+
+# Disable temporal decay
+configure_memory(action='set', config={hybridSearch: {temporalDecay: false}})
+```
+
 ### Memory Structure
 
 - `conversations/` - Conversation summaries (created manually with `/compact`)

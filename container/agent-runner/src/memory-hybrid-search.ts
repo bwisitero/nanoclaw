@@ -125,12 +125,21 @@ async function searchWithEmbeddings(query: string, groupFolder: string, limit: n
  * Search using FTS5 full-text search.
  */
 async function searchWithFTS5(query: string, groupFolder: string, chatJid: string, limit: number): Promise<SearchResult[]> {
-  const dbPath = '/workspace/project/store/messages.db';
+  // Try container path first, fall back to host path for testing
+  let dbPath = '/workspace/project/store/messages.db';
+  if (!fs.existsSync(dbPath)) {
+    // Running outside container - use relative path from project root
+    dbPath = path.join(process.cwd(), 'store/messages.db');
+  }
+
   const db = new Database(dbPath, { readonly: true });
 
   try {
     // Escape FTS5 query
     const escapedQuery = fts5Escape(query);
+
+    // Extract just the folder name from path (e.g., "groups/main" -> "main")
+    const folderName = groupFolder.split('/').pop() || groupFolder;
 
     // Search documents
     const docResults = db.prepare(`
@@ -144,7 +153,7 @@ async function searchWithFTS5(query: string, groupFolder: string, chatJid: strin
       WHERE document_chunks_fts MATCH ? AND dc.group_folder = ?
       ORDER BY rank
       LIMIT ?
-    `).all(escapedQuery, groupFolder, Math.floor(limit / 2));
+    `).all(escapedQuery, folderName, Math.floor(limit / 2));
 
     // Search conversations
     const convResults = db.prepare(`

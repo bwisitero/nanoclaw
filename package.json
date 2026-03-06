@@ -16,7 +16,9 @@
     "format:check": "prettier --check \"src/**/*.ts\"",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:memory": "tsx src/test-memory-injection.ts"
+    "test:memory": "tsx container/agent-runner/src/test-memory-injection.ts",
+    "test:memory:integration": "tsx container/agent-runner/src/test-memory-integration.ts",
+    "test:memory:e2e": "tsx container/agent-runner/src/test-memory-e2e.ts"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^7.0.0-rc.9",

@@ -16,40 +16,48 @@ export type QueryType = 'greeting' | 'code' | 'recall' | 'general';
 export function classifyQuery(prompt: string): QueryType {
   const lower = prompt.toLowerCase();
 
-  // Greetings/thanks - skip injection (no context needed)
-  const greetingKeywords = [
-    'hello', 'hi', 'hey', 'thanks', 'thank you', 'bye', 'goodbye',
-    'good morning', 'good afternoon', 'good evening', 'good night',
-  ];
-  if (greetingKeywords.some(kw => lower.includes(kw)) && prompt.length < 50) {
-    return 'greeting';
-  }
-
-  // Code tasks - skip injection unless asking about past context
-  const codeKeywords = [
-    'refactor', 'fix', 'debug', 'implement', 'add function', 'create file',
-    'write code', 'update code', 'change code', 'modify code',
-    'install', 'deploy', 'build', 'compile', 'test',
-  ];
-
-  // Explicit recall keywords - always inject
+  // Explicit recall keywords - check first (highest priority)
   const recallKeywords = [
     'who', 'where', 'when', 'what', 'remember', 'recall', 'previously',
     'before', 'last time', 'earlier', 'discussed', 'mentioned', 'talked about',
     'decided', 'agreed', 'you told', 'I told', 'we said',
   ];
 
+  if (recallKeywords.some(kw => lower.includes(kw))) {
+    return 'recall';
+  }
+
+  // Status/update queries - should inject memory even if they mention code keywords
+  const statusKeywords = ['updates on', 'status of', 'progress on', 'how is'];
+  if (statusKeywords.some(kw => lower.includes(kw))) {
+    return 'general';
+  }
+
+  // Code tasks - check before greetings to catch "debug", "deploy", etc.
+  const codeKeywords = [
+    'refactor', 'fix', 'debug', 'implement', 'add function', 'create file',
+    'write code', 'update code', 'change code', 'modify code',
+    'install', 'deploy', 'build', 'compile', 'test',
+  ];
+
   if (codeKeywords.some(kw => lower.includes(kw))) {
-    // Code task WITH recall question = inject
-    if (recallKeywords.some(kw => lower.includes(kw))) {
-      return 'recall';
-    }
     return 'code';
   }
 
-  // Explicit recall queries - always inject
-  if (recallKeywords.some(kw => lower.includes(kw))) {
-    return 'recall';
+  // Greetings/thanks - skip injection (no context needed)
+  // Check if it's PRIMARILY a greeting (starts with greeting + short)
+  const greetingKeywords = [
+    'hello', 'hi ', 'hey ', 'thanks', 'thank you', 'bye', 'goodbye',
+    'good morning', 'good afternoon', 'good evening', 'good night',
+  ];
+
+  // Must start with greeting or be very short with greeting
+  const startsWithGreeting = greetingKeywords.some(kw =>
+    lower.startsWith(kw) || lower === kw.trim()
+  );
+
+  if (startsWithGreeting && prompt.length < 50) {
+    return 'greeting';
   }
 
   // General questions - inject (might reference past decisions/preferences)

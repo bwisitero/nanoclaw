@@ -18,6 +18,9 @@ import fs from 'fs';
 import path from 'path';
 import { query, HookCallback, PreCompactHookInput, PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
 import { fileURLToPath } from 'url';
+import { loadMemoryConfig } from '../../../src/memory-config.js';
+import { classifyQuery, shouldInjectMemory } from './query-classifier.js';
+import { hybridMemorySearch, formatMemoryContext, estimateTokens } from './memory-hybrid-search.js';
 
 interface ContainerInput {
   prompt: string;
@@ -468,6 +471,36 @@ async function runQuery(
   if (containerInput.isMain && fs.existsSync(groupClaudeMdPath)) {
     const groupClaudeMd = fs.readFileSync(groupClaudeMdPath, 'utf-8');
     globalClaudeMd = globalClaudeMd ? `${globalClaudeMd}\n\n${groupClaudeMd}` : groupClaudeMd;
+  }
+
+  // Smart memory injection: automatically inject relevant memory context
+  const memoryConfig = loadMemoryConfig('/workspace/group');
+  const queryType = classifyQuery(containerInput.prompt);
+
+  if (shouldInjectMemory(queryType, memoryConfig.injection.mode)) {
+    log(`[Memory] Injecting context (mode: ${memoryConfig.injection.mode}, type: ${queryType})`);
+
+    try {
+      const memoryResults = await hybridMemorySearch(
+        containerInput.prompt,
+        containerInput.groupFolder,
+        containerInput.chatJid
+      );
+
+      if (memoryResults.length > 0) {
+        const memoryContext = formatMemoryContext(memoryResults, memoryConfig.injection.maxTokens);
+        globalClaudeMd = globalClaudeMd
+          ? `${globalClaudeMd}\n\n## Relevant Memory\n\n${memoryContext}`
+          : `## Relevant Memory\n\n${memoryContext}`;
+        log(`[Memory] Injected ${memoryResults.length} results (~${estimateTokens(memoryContext)} tokens)`);
+      } else {
+        log(`[Memory] No relevant memories found`);
+      }
+    } catch (error) {
+      log(`[Memory] Search failed, continuing without memory injection: ${error}`);
+    }
+  } else {
+    log(`[Memory] Skipped injection (mode: ${memoryConfig.injection.mode}, type: ${queryType})`);
   }
 
   // Discover additional directories mounted at /workspace/extra/*
